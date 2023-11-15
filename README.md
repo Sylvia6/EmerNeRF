@@ -85,6 +85,8 @@ Refer to [this solution](<https://github.com/NVlabs/instant-ngp/issues/119#issue
   
 For those interested in setting up a custom dataset, kindly use these two datasets as templates. Also take a look at the `datasets/base directory` to familiarize yourself with the dataset preparation process in our codebase.
 
+- **Plus Data** we query all bag snips at same areas, refer to [Plus Dataset Preparation](docs/PLUS.md)
+
 ## Run the code
 
 ### Configs
