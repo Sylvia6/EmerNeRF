@@ -1,0 +1,21 @@
+data:
+  # pose_type: 'vio'
+  data_root: /mnt/intel/jupyterhub/lu.li/plus_data
+  dataset: plus
+  scene_idx: 20230319T090808_pdb-l4e-b0007_6_871to931
+  pixel_source:
+    load_size: [540, 960]
+    num_cams: 2
+  lidar_source:
+    load_lidar: False 
+render:
+  vis_voxel_size: 0.1 
+nerf:
+  model:
+    head:
+      enable_dynamic_branch: True # whether to use dynamic branch
+      enable_shadow_head: True # whether to use shadow head
+      enable_flow_branch: True  # whether to use flow branch
+eval:
+  eval_lidar_flow: False # whether to evaluate lidar flow, only available for waymo for now
+  remove_ground_when_eval_lidar_flow: True # whether to remove ground points when evaluating lidar flow
