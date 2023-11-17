@@ -12,7 +12,7 @@ docker.plusai.co:5050/plusai/mmdetection3d:neuralsim(包含mars但不包含vio�
 ### compile (optional)
 if you use mars container, it's already installed
 ```
-cd plus_general
+cd plus_vio_process/
 sh build.sh
 ```
 

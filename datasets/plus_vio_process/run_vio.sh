@@ -27,7 +27,9 @@ elif [ -d "$bag" ]; then
             progress=$((processed_files * 100 / file_count))
             echo -e "\n-----------------------------"
             echo -ne "Processing file: $file [$processed_files/$file_count] [$progress%]\r"
+
             python -m visual_odom.main --bag_name "$file" --cache_pre "$out_dir" --nerf True
+            
             echo -e "------------------------------\n"
         fi
     done

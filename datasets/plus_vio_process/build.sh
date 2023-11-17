@@ -1,4 +1,4 @@
-conda activate emernerf
+# conda activate emernerf
 
 cd plus_general/csrc
 
