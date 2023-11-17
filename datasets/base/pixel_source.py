@@ -404,6 +404,9 @@ class ScenePixelSource(abc.ABC):
         if self.num_cams == 1:
             # if there is only one camera, it's front camera
             front_cameras_positions = self.cam_to_worlds[:, :3, 3]
+        elif self.num_cams == 2:
+            # if there are three cameras, they are ordered as front_left, front, front_right
+            front_cameras_positions = self.cam_to_worlds[::2, :3, 3]
         elif self.num_cams == 3:
             # if there are three cameras, they are ordered as front_left, front, front_right
             front_cameras_positions = self.cam_to_worlds[1::3, :3, 3]

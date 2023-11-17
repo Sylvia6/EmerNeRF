@@ -186,3 +186,9 @@ wandb/
 
 *results*
 *debug*
+
+.vscode
+
+# plus_general
+datasets/plus_vio_process/plus_general/csrc/common*
+datasets/plus_vio_process/plus_general/csrc/g2opy

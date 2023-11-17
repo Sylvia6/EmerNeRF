@@ -69,7 +69,7 @@ class PlusPixelSource(ScenePixelSource):
         start_timestep: int = 0,
         end_timestep: int = -1,
         device: torch.device = torch.device("cpu"),
-        pose_type: str = 'vio',
+        pose_type: str = 'vio', 
     ):
         super().__init__(pixel_data_config, device=device)
         self.data_path = data_path
@@ -152,7 +152,6 @@ class PlusPixelSource(ScenePixelSource):
         elif self.pose_type == 'vio':
             import json
             opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
-            opengl2opencv = np.linalg.inv(opencv2opengl)
             data_file = os.path.join(self.data_path, "transforms.json")
             assert os.path.exists(data_file)
             with open(data_file) as f:
@@ -160,7 +159,7 @@ class PlusPixelSource(ScenePixelSource):
             frames = data['frames']
             cam_ids = np.array([total_camera_dict[frame['cam_name']] for frame in frames])
             intrs = np.array([frame['intr'] for frame in frames])
-            c2ws = np.array([frame['transform_matrix'] @ opengl2opencv for frame in frames]) # opengl to opencv
+            c2ws = np.array([frame['transform_matrix'] @ opencv2opengl for frame in frames]) # opengl to opencv
 
         indices = self.selected_steps * self.num_cams
         for i in range(self.num_cams):
