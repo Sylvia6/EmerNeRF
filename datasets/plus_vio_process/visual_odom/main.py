@@ -376,12 +376,10 @@ class Pipeline(object):
           
         opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
         opengl2opencv = np.linalg.inv(opencv2opengl)
-        # opengl2world = np.array([[0,0,-1,0], [-1,0,0,0], [0,1,0, 0],[0,0,0,1]]).astype(float)
-        opengl2world = np.array([[-1,0,0,0],[0,-1,0,0],[0,0,1,0],[0,0,0,-1]])
+        opengl2world = np.array([[0,0,-1,0], [-1,0,0,0], [0,1,0, 0],[0,0,0,1]]).astype(float)
 
         def cam_pose_to_nerf(cam_pose):
-            # gl_pose = opencv2opengl.dot(cam_pose.dot(opengl2opencv))  
-            gl_pose = cam_pose.dot(opengl2opencv)
+            gl_pose = opencv2opengl.dot(cam_pose.dot(opengl2opencv))  
             world_pose = opengl2world.dot(gl_pose)
             return world_pose.tolist()
 
