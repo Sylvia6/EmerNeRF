@@ -337,7 +337,8 @@ def render_rays(
             for k, v in chunk_data_dict.items()
             if k not in [prefix + "viewdirs", prefix + "origins", "pixel_coords", "scene_id"]\
         }
-        sub_dict['scene_id'] = chunk_data_dict['scene_id']
+        if 'scene_id' in chunk_data_dict:
+            sub_dict['scene_id'] = chunk_data_dict['scene_id']
         sub_dict["t_starts"], sub_dict["t_ends"] = t_starts, t_ends
         if "pixel_coords" in chunk_data_dict:
             # use this for positional embedding decomposition

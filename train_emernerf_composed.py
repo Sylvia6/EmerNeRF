@@ -117,6 +117,12 @@ def get_args_parser():
         default=None,
         nargs=argparse.REMAINDER,
     )
+    # render novel
+    parser.add_argument(
+        "--nvs_param", 
+        type=str, 
+        default=None
+    )
     return parser
 
 
@@ -439,6 +445,84 @@ def do_evaluation(
         # TODO: add a novel trajectory rendering part
 
 
+@torch.no_grad()
+def render_novel(
+    cfg: OmegaConf = None,
+    model: RadianceField = None,
+    proposal_networks: Optional[List[DensityField]] = None,
+    proposal_estimator: PropNetEstimator = None,
+    dataset: SceneDataset = None,
+    args: argparse.Namespace = None,
+):
+    logger.info("Rendering novel view on the full set...")
+    model.eval()
+    proposal_estimator.eval()
+    for p in proposal_networks:
+        p.eval()
+
+    def rotation_matrix(roll, pitch, yaw):
+        ret = np.eye(4)
+        roll = np.radians(roll)
+        pitch = np.radians(pitch)
+        yaw = np.radians(yaw)
+
+        Rx = np.array([[1, 0, 0],
+                    [0, np.cos(roll), -np.sin(roll)],
+                    [0, np.sin(roll), np.cos(roll)]])
+
+        Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
+                    [0, 1, 0],
+                    [-np.sin(pitch), 0, np.cos(pitch)]])
+
+        Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                    [np.sin(yaw), np.cos(yaw), 0],
+                    [0, 0, 1]])
+
+        R = np.dot(Rz, np.dot(Ry, Rx))
+        ret[:3, :3] = R
+        return ret
+
+    if args.nvs_param is not None:
+        roll, pitch, yaw = [float(i) for i in args.nvs_param.split(',')]
+        novel_trans = rotation_matrix(roll, pitch, yaw)
+
+    if cfg.data.pixel_source.load_rgb and cfg.render.render_low_res:
+        logger.info("Rendering full set but in a low_resolution...")
+        if isinstance(dataset.pixel_source, dict):
+            for _, pixel_source in dataset.pixel_source.items():
+                pixel_source.cam_to_worlds = pixel_source.cam_to_worlds @ torch.from_numpy(novel_trans).type(torch.FloatTensor)
+                pixel_source.update_downscale_factor(1 / cfg.render.low_res_downscale)
+        else:
+            dataset.pixel_source.update_downscale_factor(1 / cfg.render.low_res_downscale)
+        render_results = render_pixels(
+            cfg=cfg,
+            model=model,
+            proposal_networks=proposal_networks,
+            proposal_estimator=proposal_estimator,
+            dataset=dataset.full_pixel_set,
+            compute_metrics=True,
+            return_decomposition=True,
+        )
+        if isinstance(dataset.pixel_source, dict):
+            for _, pixel_source in dataset.pixel_source.items():
+                pixel_source.reset_downscale_factor()
+        else:
+            dataset.pixel_source.reset_downscale_factor()
+        video_output_pth = os.path.join(cfg.log_dir, "novel.mp4")
+        vis_frame_dict = save_videos(
+            render_results,
+            video_output_pth,
+            num_timestamps=sum(dataset.num_img_timesteps.values()),
+            keys=render_keys,
+            save_seperate_video=cfg.logging.save_seperate_video,
+            num_cams=dataset.num_cams,
+            fps=cfg.render.fps,
+            verbose=True,
+        )
+        del render_results, vis_frame_dict
+        torch.cuda.empty_cache()
+
+
 def main(args):
     cfg = setup(args)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -508,7 +592,8 @@ def main(args):
             f"Will start training for {cfg.optim.num_iters} iterations from scratch"
         )
 
-    if args.visualize_voxel or args.eval_only:
+    if args.visualize_voxel:
+        # or args.eval_only:
         if cfg.nerf.model.head.enable_flow_branch:
             logger.info("Visualizing scene flow...")
             visualize_scene_flow(
@@ -533,15 +618,25 @@ def main(args):
         exit()  
 
     if args.eval_only:
-        do_evaluation(
-            step=start_step,
-            cfg=cfg,
-            model=model,
-            proposal_networks=proposal_networks,
-            proposal_estimator=proposal_estimator,
-            dataset=dataset,
-            args=args,
-        )
+        if args.nvs_param is not None:
+            render_novel(
+                cfg=cfg,
+                model=model,
+                proposal_networks=proposal_networks,
+                proposal_estimator=proposal_estimator,
+                dataset=dataset,
+                args=args,
+            )
+        else:
+            do_evaluation(
+                step=start_step,
+                cfg=cfg,
+                model=model,
+                proposal_networks=proposal_networks,
+                proposal_estimator=proposal_estimator,
+                dataset=dataset,
+                args=args,
+            )
         exit()
 
     # ------ build losses -------- #
@@ -656,6 +751,7 @@ def main(args):
                     pixel_data_dict[k] = v.cuda(non_blocking=True)
             scene_id = dataset.train_pixel_set.get_scene_id(i)
             pixel_data_dict['scene_id'] = scene_id
+
             # ------ pixel-wise supervision -------- #
             render_results = render_rays(
                 radiance_field=model,

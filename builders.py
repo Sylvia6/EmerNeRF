@@ -35,7 +35,7 @@ def build_model_from_cfg(
     model = build_radiance_field_from_cfg(cfg)
     model.register_normalized_training_timesteps(
         dataset.unique_normalized_training_timestamps,
-        time_diff={scene_id: 1 / nt for scene_id, nt in dataset.num_img_timesteps.items()},
+        time_diff= 1 / dataset.num_img_timesteps,
     )
     if dataset.aabb is not None and cfg.resume_from is None:
         model.set_aabb(dataset.aabb)
