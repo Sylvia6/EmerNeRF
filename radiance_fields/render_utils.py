@@ -306,7 +306,10 @@ def render_rays(
         num_rays = height * width
         reshaped_data_dict = {}
         for k, v in data_dict.items():
-            reshaped_data_dict[k] = v.reshape(num_rays, -1).squeeze()
+            if k not in ['scene_id']:
+                reshaped_data_dict[k] = v.reshape(num_rays, -1).squeeze()
+        if 'scene_id' in data_dict:
+            reshaped_data_dict['scene_id'] = data_dict['scene_id']
     else:
         num_rays, _ = rays_shape
         reshaped_data_dict = data_dict.copy()
@@ -332,8 +335,9 @@ def render_rays(
         sub_dict = {
             k: v[..., None].repeat_interleave(t_starts.shape[-1], dim=-1)
             for k, v in chunk_data_dict.items()
-            if k not in [prefix + "viewdirs", prefix + "origins", "pixel_coords"]
+            if k not in [prefix + "viewdirs", prefix + "origins", "pixel_coords", "scene_id"]\
         }
+        sub_dict['scene_id'] = chunk_data_dict['scene_id']
         sub_dict["t_starts"], sub_dict["t_ends"] = t_starts, t_ends
         if "pixel_coords" in chunk_data_dict:
             # use this for positional embedding decomposition
@@ -349,7 +353,9 @@ def render_rays(
     results = []
     chunk = 2**24 if radiance_field.training else cfg.render.render_chunk_size
     for i in range(0, num_rays, chunk):
-        chunk_data_dict = {k: v[i : i + chunk] for k, v in reshaped_data_dict.items()}
+        chunk_data_dict = {k: v[i : i + chunk] for k, v in reshaped_data_dict.items() if k !='scene_id' }
+        if 'scene_id' in reshaped_data_dict:
+            chunk_data_dict['scene_id'] = reshaped_data_dict['scene_id']
         assert proposal_networks is not None, "proposal_networks is required."
         # obtain proposed intervals
         t_starts, t_ends = proposal_estimator.sampling(

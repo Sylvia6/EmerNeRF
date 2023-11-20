@@ -491,7 +491,7 @@ class ScenePixelSource(abc.ABC):
         else:
             logger.info("Not building pixel error buffer because buffer_ratio <= 0.")
 
-    def update_pixel_error_maps(self, render_results: Dict[str, Tensor]) -> None:
+    def update_pixel_error_maps(self, render_results: Dict[str, Tensor], idx: List[int]) -> None:
         """
         Update the pixel error buffer with the given render results.
         """
@@ -500,6 +500,10 @@ class ScenePixelSource(abc.ABC):
             return
         gt_rgbs = render_results["gt_rgbs"]
         pred_rgbs = render_results["rgbs"]
+        if idx is not None:
+            gt_rgbs = gt_rgbs[idx[0] : idx[1]]
+            pred_rgbs = pred_rgbs[idx[0] : idx[1]]
+
         gt_rgbs = torch.from_numpy(np.stack(gt_rgbs, axis=0))
         pred_rgbs = torch.from_numpy(np.stack(pred_rgbs, axis=0))
         pixel_error_maps = torch.abs(gt_rgbs - pred_rgbs).mean(dim=-1)
@@ -507,6 +511,8 @@ class ScenePixelSource(abc.ABC):
         if "dynamic_opacities" in render_results:
             if len(render_results["dynamic_opacities"]) > 0:
                 dynamic_opacity = render_results["dynamic_opacities"]
+                if idx is not None:
+                    dynamic_opacity = dynamic_opacity[idx[0] : idx[1]]
                 dynamic_opacity = torch.from_numpy(np.stack(dynamic_opacity, axis=0))
                 # we prioritize the dynamic objects by multiplying the error by 5
                 pixel_error_maps[dynamic_opacity > 0.1] *= 5

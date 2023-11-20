@@ -8,6 +8,8 @@ from omegaconf import OmegaConf
 from torch import Tensor
 from tqdm import trange
 
+from torch.utils.data import ConcatDataset
+
 from datasets.base.lidar_source import SceneLidarSource
 from datasets.base.pixel_source import ScenePixelSource
 from datasets.base.scene_dataset import SceneDataset
@@ -230,6 +232,7 @@ class PlusDataset(SceneDataset):
         self.data_path = os.path.join(self.data_cfg.data_root, self.scene_idx)
         assert self.data_cfg.dataset == "plus"
         assert os.path.exists(self.data_path), f"{self.data_path} does not exist"
+        print(f"Processing scene: {self.scene_idx}")
 
         # ---- find the number of synchronized frames ---- #
         if self.data_cfg.end_timestep == -1:
@@ -557,3 +560,120 @@ class PlusDataset(SceneDataset):
             verbose=verbose,
             save_seperate_video=False,
         )
+
+class ConcatDataSource(ConcatDataset):
+    def __init__(self, datasets):
+        super(ConcatDataSource, self).__init__(datasets)
+
+    def get_dataset_idx(self, idx):
+        """
+        获取索引为 idx 的样本所属的原始数据集索引
+        """
+        cumulative_sizes = [0] + self.cumulative_sizes
+        for i, size in enumerate(cumulative_sizes[:-1]):
+            if idx >= size and idx < cumulative_sizes[i + 1]:
+                return i
+        raise ValueError("Index out of range")
+    
+    def get_scene_id(self, idx):
+        scene_idx = self.get_dataset_idx(idx)
+        if hasattr(self.datasets[scene_idx], 'scene_id'):
+            return getattr(self.datasets[scene_idx], 'scene_id')
+        else:
+            return ""
+        
+class ScenarioDataset(SceneDataset):
+    dataset: str = "plus"
+
+    def __init__(
+        self,
+        data_cfg: OmegaConf,
+    ) -> None:
+        super().__init__(data_cfg)
+        assert self.data_cfg.dataset == "plus"
+
+        self.scenes = {}
+
+        aabb_min, aabb_max = -1*torch.ones(3), torch.ones(3)
+        if "scenarios" in data_cfg:
+            for scenario_cfg_str in data_cfg.scenarios:
+                _scene_id, start, stop = [it.strip(' ') for it in scenario_cfg_str.split(',')]
+                cfg = data_cfg.copy()
+                cfg.scene_idx = _scene_id
+                cfg.start_timestep, cfg.end_timestep = int(start), int(stop)
+                dataset = PlusDataset(data_cfg=cfg)
+                self.scenes[_scene_id] = dataset
+                # cal scenario_aabb
+                aabb_min[aabb_min > dataset.aabb[:3]] =  dataset.aabb[:3][aabb_min > dataset.aabb[:3]]
+                aabb_max[aabb_max < dataset.aabb[3:]] =  dataset.aabb[3:][aabb_max < dataset.aabb[3:]]
+        self.aabb = torch.concatenate([aabb_min, aabb_max])
+
+        # ---- create split wrappers ---- #
+        self.build_split_wrapper()
+
+        self.pixel_source = {scene_id: dataset.pixel_source for scene_id, dataset in self.scenes.items()}
+        self.lidar_source = {scene_id: dataset.pixel_source for scene_id, dataset in self.scenes.items()}
+    
+    @property
+    def num_cams(self) -> int:
+        return next(iter(self.pixel_source.values())).num_cams
+
+    @property
+    def num_train_timesteps(self) -> Dict[str, int]:
+        return {scene_id: len(dataset.train_timesteps) for scene_id, dataset in self.scenes.items()}
+
+    @property
+    def unique_normalized_training_timestamps(self) -> Dict[str, Tensor]:
+        return {
+            scene_id: dataset.pixel_source.unique_normalized_timestamps[dataset.train_timesteps]
+            for scene_id, dataset in self.scenes.items()
+            }
+    
+    @property
+    def num_img_timesteps(self) -> Dict[str, int]:
+        return {scene_id: dataset.pixel_source.num_timesteps for scene_id, dataset in self.scenes.items()}
+
+    def build_split_wrapper(self):
+        """
+        Makes each data source as a Pytorch Dataset
+        """
+        names = ['train_pixel_set', 'test_pixel_set', 'full_pixel_set', 'train_lidar_set', 'test_lidar_set', 'full_lidar_set']
+        self.train_pixel_set, self.test_pixel_set, self.full_pixel_set = [], [], []
+        self.train_lidar_set, self.test_lidar_set, self.full_lidar_set = [], [], []
+
+        for name in names:
+            for scene_id, dataset in self.scenes.items():
+                if hasattr(dataset, name) and getattr(dataset, name) is not None:
+                    data = getattr(dataset, name)
+                    setattr(data, 'scene_id', scene_id)
+                    getattr(self, name).append(data)
+            concat_dataset = getattr(self, name)
+            concat_dataset = ConcatDataSource(concat_dataset) if len(concat_dataset) > 0 else None
+            setattr(self, name, concat_dataset)
+                
+    def build_data_source(self):
+        pass
+
+    def split_train_test(self):
+        pass
+
+    def save_videos(self, video_dict: dict, **kwargs):
+        """
+        Save the a video of the data.
+        """
+        pass
+
+    def render_data_videos(
+        self,
+        save_pth: str,
+        split: str = "full",
+        fps: int = 24,
+        verbose=True,
+    ):
+        """
+        Render a video of data.
+        """
+
+        # for scene_id, dataset in scenarios:
+        #     save_pth = os.path.join(cfg.log_dir, f"{scene_id}_data.mp4")
+        pass

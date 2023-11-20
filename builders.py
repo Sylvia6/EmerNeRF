@@ -1,6 +1,6 @@
 import itertools
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import torch
 from omegaconf import OmegaConf
@@ -11,7 +11,9 @@ from radiance_fields import (
     RadianceField,
     build_density_field,
     build_radiance_field_from_cfg,
+    build_composed_radiance_field_from_cfg
 )
+
 from third_party.nerfacc_prop_net import PropNetEstimator
 
 logger = logging.getLogger()
@@ -33,7 +35,7 @@ def build_model_from_cfg(
     model = build_radiance_field_from_cfg(cfg)
     model.register_normalized_training_timesteps(
         dataset.unique_normalized_training_timestamps,
-        time_diff=1 / dataset.num_img_timesteps,
+        time_diff={scene_id: 1 / nt for scene_id, nt in dataset.num_img_timesteps.items()},
     )
     if dataset.aabb is not None and cfg.resume_from is None:
         model.set_aabb(dataset.aabb)
@@ -46,6 +48,35 @@ def build_model_from_cfg(
         )
     return model.to(device)
 
+def build_composed_model_from_cfg(
+    cfg: OmegaConf,
+    dataset: SceneDataset,
+    device: torch.device = torch.device("cpu"),
+) -> RadianceField:
+    cfg.num_train_timesteps = dataset.num_train_timesteps
+    cfg.scene_ids = list(dataset.scenes.keys())
+    if dataset.test_pixel_set is not None:
+        if cfg.head.enable_img_embedding:
+            cfg.head.enable_cam_embedding = True
+            cfg.head.enable_img_embedding = False
+            logger.info(
+                "Overriding enable_img_embedding to False because we have a test set."
+            )
+    model = build_composed_radiance_field_from_cfg(cfg)
+    model.register_normalized_training_timesteps(
+        dataset.unique_normalized_training_timestamps,
+        time_diff={scene_id: 1 / nt for scene_id, nt in dataset.num_img_timesteps.items()},
+    )
+    if dataset.aabb is not None and cfg.resume_from is None:
+        model.set_aabb(dataset.aabb)
+    if cfg.head.enable_feature_head:
+        # we cache the PCA reduction matrix and min/max values for visualization
+        model.register_feats_reduction_mat(
+            dataset.pixel_source.feat_dimension_reduction_mat,
+            dataset.pixel_source.feat_color_min,
+            dataset.pixel_source.feat_color_max,
+        )
+    return model.to(device)
 
 def build_optimizer_from_cfg(
     cfg: OmegaConf, model: RadianceField

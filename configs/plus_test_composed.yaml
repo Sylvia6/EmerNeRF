@@ -1,0 +1,36 @@
+data:
+  # pose_type: 'vio'
+  data_root: /mnt/intel/jupyterhub/lu.li/plus_data/area
+  dataset: plus
+  preload_device: cpu  
+  scenarios:
+    # scene_name, start_frame, end_frame(-1 -> len(scene))
+    - 20231101T102809_pdb-l4e-b0006_1_482to491, 0, -1 
+    - 20231104T131052_pdb-l4e-b0001_1_172to181, 0, -1
+    - 20231103T103225_pdb-l4e-b0001_4_864to874, 0, -1
+
+    # test same bag, validate composed_model
+    # - 20231101T102809_pdb-l4e-b0006_1_482to491, 0, -1 
+    # - 20231101T102809_pdb-l4e-b0006_1_482to491_, 0, -1
+
+  # scene_idx: 20230319T090808_pdb-l4e-b0007_6_871to931
+  pixel_source:
+    load_size: [540, 960]
+    num_cams: 2
+    load_dynamic_mask: False 
+    load_sky_mask: False
+  lidar_source:
+    load_lidar: False 
+render:
+  vis_voxel_size: 0.1 
+nerf:
+  model:
+    head:
+      enable_dynamic_branch: True # whether to use dynamic branch
+      enable_shadow_head: True # whether to use shadow head
+      enable_flow_branch: True  # whether to use flow branch
+      # ========== sky =========== #
+      enable_sky_head: False # will also initialize a feature sky head when a feature head is enabled
+eval:
+  eval_lidar_flow: False # whether to evaluate lidar flow, only available for waymo for now
+  remove_ground_when_eval_lidar_flow: True # whether to remove ground points when evaluating lidar flow

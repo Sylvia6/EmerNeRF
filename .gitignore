@@ -164,7 +164,7 @@ cython_debug/
 
 # custom
 # logs
-data/
+/data/
 local_scripts/
 package_hacks/
 

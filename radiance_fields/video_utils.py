@@ -149,14 +149,20 @@ def render(
         masked_psnrs, masked_ssims = [], []
         masked_feat_psnrs = []
 
+    from torch.utils.data import ConcatDataset
     with torch.no_grad():
         indices = vis_indices if vis_indices is not None else range(len(dataset))
         computed = False
-        for i in tqdm(indices, desc=f"rendering {dataset.split}", dynamic_ncols=True):
+        split = dataset.split if not isinstance(dataset, ConcatDataset) else dataset.datasets[0].split
+        for i in tqdm(indices, desc=f"rendering {split}", dynamic_ncols=True):
             data_dict = dataset[i]
+            if isinstance(dataset, ConcatDataset):
+                scene_id = dataset.get_scene_id(i)
+                data_dict['scene_id'] = scene_id
             for k, v in data_dict.items():
                 if isinstance(v, Tensor):
-                    data_dict[k] = v.cuda(non_blocking=True)
+                    if k not in ['scene_id']:
+                        data_dict[k] = v.cuda(non_blocking=True)
             results = render_func(data_dict)
             # ------------- rgb ------------- #
             rgb = results["rgb"]
