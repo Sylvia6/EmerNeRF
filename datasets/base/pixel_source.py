@@ -1,7 +1,7 @@
 import abc
 import logging
 import os
-from typing import Dict, Tuple, Union, List
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -10,7 +10,7 @@ from PIL import Image
 from torch import Tensor
 from tqdm import tqdm
 
-from third_party.feature_extractor import delete_features, extract_and_save_features
+from third_party.feature_extractor import (delete_features, extract_and_save_features)
 from utils.misc import get_robust_pca
 
 logger = logging.getLogger()
@@ -491,7 +491,9 @@ class ScenePixelSource(abc.ABC):
         else:
             logger.info("Not building pixel error buffer because buffer_ratio <= 0.")
 
-    def update_pixel_error_maps(self, render_results: Dict[str, Tensor], idx: List[int]) -> None:
+    def update_pixel_error_maps(
+            self, render_results: Dict[str, Tensor], idx: List[int] = None
+        ) -> None:
         """
         Update the pixel error buffer with the given render results.
         """
@@ -500,7 +502,7 @@ class ScenePixelSource(abc.ABC):
             return
         gt_rgbs = render_results["gt_rgbs"]
         pred_rgbs = render_results["rgbs"]
-        if idx is not None:
+        if idx:
             gt_rgbs = gt_rgbs[idx[0] : idx[1]]
             pred_rgbs = pred_rgbs[idx[0] : idx[1]]
 
@@ -511,7 +513,7 @@ class ScenePixelSource(abc.ABC):
         if "dynamic_opacities" in render_results:
             if len(render_results["dynamic_opacities"]) > 0:
                 dynamic_opacity = render_results["dynamic_opacities"]
-                if idx is not None:
+                if idx:
                     dynamic_opacity = dynamic_opacity[idx[0] : idx[1]]
                 dynamic_opacity = torch.from_numpy(np.stack(dynamic_opacity, axis=0))
                 # we prioritize the dynamic objects by multiplying the error by 5

@@ -11,8 +11,10 @@ from radiance_fields.encodings import (
     SinusoidalEncoder,
     build_xyz_encoder_from_cfg,
 )
-from radiance_fields.nerf_utils import contract, find_topk_nearby_timesteps, trunc_exp
 from radiance_fields.mlp import MLP
+from radiance_fields.nerf_utils import contract, trunc_exp
+from radiance_fields.radiance_field import temporal_interpolation
+
 
 logger = logging.getLogger()
 
@@ -144,7 +146,7 @@ class ComposedRadianceField(nn.Module):
             + (
                 appearance_embedding_dim
                 if self.enable_cam_embedding or self.enable_img_embedding
-                else 0  # 2 or 0?
+                else 0
             ),
             out_dims=3,
             num_layers=3,
@@ -179,6 +181,7 @@ class ComposedRadianceField(nn.Module):
             )
             if enable_feature_head:
                 # feature sky head
+                raise NotImplementedError
                 self.dino_sky_head = nn.Sequential(
                     # TODO: remove appearance embedding from dino sky head
                     nn.Linear(
@@ -199,6 +202,7 @@ class ComposedRadianceField(nn.Module):
         # ======== Feature Head ======== #
         self.enable_feature_head = enable_feature_head
         if self.enable_feature_head:
+            raise NotImplementedError
             self.dino_head = nn.Sequential(
                 nn.Linear(semantic_feature_dim, feature_mlp_layer_width),
                 nn.ReLU(),
@@ -227,7 +231,7 @@ class ComposedRadianceField(nn.Module):
                 )
 
     def register_normalized_training_timesteps(
-        self, normalized_timesteps: Dict[str, Tensor], time_diff: Dict[str, Tensor]
+        self, normalized_timesteps: Dict[str, Tensor], time_diff: Dict[str, float]
     ) -> None:
         """
         register normalized timesteps for temporal interpolation
@@ -434,7 +438,7 @@ class ComposedRadianceField(nn.Module):
         has_timestamps = (
             "normed_timestamps" in data_dict or "lidar_normed_timestamps" in data_dict
         )
-        scene_id = data_dict['scene_id']
+        scene_id = data_dict["scene_id"]
         if len(self.dynamic_xyz_encoder) > 0 and has_timestamps:
             # forward dynamic branch
             if "normed_timestamps" in data_dict:
@@ -557,7 +561,7 @@ class ComposedRadianceField(nn.Module):
         ):
             directions = directions[:, 0]
             reduced_data_dict = {k: v[:, 0] for k, v in data_dict.items()}
-            sky_results = self.query_sky(directions, data_dict=reduced_data_dict)
+            sky_results = self.query_sky(scene_id, directions, data_dict=reduced_data_dict)
             results_dict.update(sky_results)
 
         return results_dict
@@ -676,7 +680,7 @@ class ComposedRadianceField(nn.Module):
         return results
 
     def query_sky(
-        self, directions: Tensor, data_dict: Dict[str, Tensor] = None
+        self, scene_id, directions: Tensor, data_dict: Dict[str, Tensor] = None
     ) -> Dict[str, Tensor]:
         if len(directions.shape) == 2:
             dd = self.direction_encoding(directions).to(directions)
@@ -803,125 +807,6 @@ class ComposedRadianceField(nn.Module):
         return results_dict
 
 
-class DensityField(nn.Module):
-    def __init__(
-        self,
-        xyz_encoder: HashEncoder,
-        aabb: Union[Tensor, List[float]] = [[-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]],
-        num_dims: int = 3,
-        density_activation: Callable = lambda x: trunc_exp(x - 1),
-        unbounded: bool = False,
-        base_mlp_layer_width: int = 64,
-    ) -> None:
-        super().__init__()
-        if not isinstance(aabb, Tensor):
-            aabb = torch.tensor(aabb, dtype=torch.float32)
-        self.register_buffer("aabb", aabb)
-        self.num_dims = num_dims
-        self.density_activation = density_activation
-        self.unbounded = unbounded
-        self.xyz_encoder = xyz_encoder
-
-        # density head
-        self.base_mlp = nn.Sequential(
-            nn.Linear(self.xyz_encoder.n_output_dims, base_mlp_layer_width),
-            nn.ReLU(),
-            nn.Linear(base_mlp_layer_width, 1),
-        )
-
-    @property
-    def device(self) -> torch.device:
-        return self.aabb.device
-
-    def set_aabb(self, aabb: Union[Tensor, List[float]]) -> None:
-        if not isinstance(aabb, Tensor):
-            aabb = torch.tensor(aabb, dtype=torch.float32)
-        logger.info(f"Set propnet aabb from {self.aabb} to {aabb}")
-        self.aabb.copy_(aabb)
-        self.aabb = self.aabb.to(self.device)
-
-    def forward(
-        self, positions: Tensor, data_dict: Dict[str, Tensor] = None
-    ) -> Dict[str, Tensor]:
-        if self.unbounded:
-            # use infinte norm to contract the positions for cuboid aabb
-            positions = contract(positions, self.aabb, ord=float("inf"))
-        else:
-            aabb_min, aabb_max = torch.split(self.aabb, 3, dim=-1)
-            positions = (positions - aabb_min) / (aabb_max - aabb_min)
-        selector = ((positions > 0.0) & (positions < 1.0)).all(dim=-1).to(positions)
-        positions = positions * selector.unsqueeze(-1)
-        xyz_encoding = self.xyz_encoder(positions.view(-1, self.num_dims))
-        density_before_activation = self.base_mlp(xyz_encoding).view(
-            list(positions.shape[:-1]) + [-1]
-        )
-        density = self.density_activation(density_before_activation)
-        return {"density": density}
-
-
-def temporal_interpolation(
-    normed_timestamps: Tensor,
-    training_timesteps: Tensor,
-    normed_positions: Tensor,
-    hash_encoder: HashEncoder,
-    mlp: nn.Module,
-    interpolate_xyz_encoding: bool = False,
-) -> Tensor:
-    # to be studied
-    if len(normed_timestamps.shape) == 2:
-        timestep_slice = normed_timestamps[:, 0]
-    else:
-        timestep_slice = normed_timestamps[:, 0, 0]
-    closest_timesteps = find_topk_nearby_timesteps(training_timesteps, timestep_slice)
-    if torch.allclose(closest_timesteps[:, 0], timestep_slice):
-        temporal_positions = torch.cat([normed_positions, normed_timestamps], dim=-1)
-        xyz_encoding = hash_encoder(
-            temporal_positions.view(-1, temporal_positions.shape[-1])
-        ).view(list(temporal_positions.shape[:-1]) + [-1])
-        encoded_feats = mlp(xyz_encoding)
-    else:
-        left_timesteps, right_timesteps = (
-            closest_timesteps[:, 0],
-            closest_timesteps[:, 1],
-        )
-        left_timesteps = left_timesteps.unsqueeze(-1).repeat(
-            1, normed_positions.shape[1]
-        )
-        right_timesteps = right_timesteps.unsqueeze(-1).repeat(
-            1, normed_positions.shape[1]
-        )
-        left_temporal_positions = torch.cat(
-            [normed_positions, left_timesteps.unsqueeze(-1)], dim=-1
-        )
-        right_temporal_positions = torch.cat(
-            [normed_positions, right_timesteps.unsqueeze(-1)], dim=-1
-        )
-        offset = (
-            (
-                (timestep_slice - left_timesteps[:, 0])
-                / (right_timesteps[:, 0] - left_timesteps[:, 0])
-            )
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-        )
-        left_xyz_encoding = hash_encoder(
-            left_temporal_positions.view(-1, left_temporal_positions.shape[-1])
-        ).view(list(left_temporal_positions.shape[:-1]) + [-1])
-        right_xyz_encoding = hash_encoder(
-            right_temporal_positions.view(-1, left_temporal_positions.shape[-1])
-        ).view(list(right_temporal_positions.shape[:-1]) + [-1])
-        if interpolate_xyz_encoding:
-            encoded_feats = mlp(
-                left_xyz_encoding * (1 - offset) + right_xyz_encoding * offset
-            )
-        else:
-            encoded_feats = (
-                mlp(left_xyz_encoding) * (1 - offset) + mlp(right_xyz_encoding) * offset
-            )
-
-    return encoded_feats
-
-
 def build_composed_radiance_field_from_cfg(cfg, verbose=True) -> ComposedRadianceField:
     xyz_encoder = build_xyz_encoder_from_cfg(cfg.xyz_encoder, verbose=verbose)
     dynamic_xyz_encoders = nn.ParameterDict()
@@ -965,33 +850,4 @@ def build_composed_radiance_field_from_cfg(cfg, verbose=True) -> ComposedRadianc
         interpolate_xyz_encoding=cfg.head.interpolate_xyz_encoding,
         enable_learnable_pe=cfg.head.enable_learnable_pe,
         enable_temporal_interpolation=cfg.head.enable_temporal_interpolation,
-    )
-
-
-def build_density_field(
-    aabb: Union[Tensor, List[float]] = [[-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]],
-    type: Literal["HashEncoder"] = "HashEncoder",
-    n_input_dims: int = 3,
-    n_levels: int = 5,
-    base_resolution: int = 16,
-    max_resolution: int = 128,
-    log2_hashmap_size: int = 20,
-    n_features_per_level: int = 2,
-    unbounded: bool = True,
-) -> DensityField:
-    if type == "HashEncoder":
-        xyz_encoder = HashEncoder(
-            n_input_dims=n_input_dims,
-            n_levels=n_levels,
-            base_resolution=base_resolution,
-            max_resolution=max_resolution,
-            log2_hashmap_size=log2_hashmap_size,
-            n_features_per_level=n_features_per_level,
-        )
-    else:
-        raise NotImplementedError(f"Unknown (xyz_encoder) type: {type}")
-    return DensityField(
-        xyz_encoder=xyz_encoder,
-        aabb=aabb,
-        unbounded=unbounded,
     )

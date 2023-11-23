@@ -3,15 +3,20 @@ data:
   data_root: /mnt/intel/jupyterhub/lu.li/plus_data/area
   dataset: plus
   preload_device: cpu  
+  ray_batch_size: 8192 # ray batch size for training, it's embedded in the dataset class for now
   scenarios:
     # scene_name, start_frame, end_frame(-1 -> len(scene))
-    - 20231101T102809_pdb-l4e-b0006_1_482to491, 0, -1 
-    - 20231104T131052_pdb-l4e-b0001_1_172to181, 0, -1
-    - 20231103T103225_pdb-l4e-b0001_4_864to874, 0, -1
+    # - 20231101T102809_pdb-l4e-b0006_1_482to491, 0, -1 
+    # - 20231104T131052_pdb-l4e-b0001_1_172to181, 0, -1
+    # - 20231103T103225_pdb-l4e-b0001_4_864to874, 0, -1
 
     # test same bag, validate composed_model
     # - 20231101T102809_pdb-l4e-b0006_1_482to491, 0, -1 
     # - 20231101T102809_pdb-l4e-b0006_1_482to491_, 0, -1
+
+    - 20231103T103225_pdb-l4e-b0001_4_864to874, 0, -1
+    - 20231103T103225_pdb-l4e-b0001_4_864to874_, 0, -1
+    # - 20231102T120243_pdb-l4e-b0001_7_2to9, 0, -1
 
   # scene_idx: 20230319T090808_pdb-l4e-b0007_6_871to931
   pixel_source:
@@ -31,6 +36,40 @@ nerf:
       enable_flow_branch: True  # whether to use flow branch
       # ========== sky =========== #
       enable_sky_head: False # will also initialize a feature sky head when a feature head is enabled
-eval:
-  eval_lidar_flow: False # whether to evaluate lidar flow, only available for waymo for now
-  remove_ground_when_eval_lidar_flow: True # whether to remove ground points when evaluating lidar flow
+
+supervision: # supervision hyperparameters
+  # rgb: # rgb supervision
+  #   loss_type: l2 # choose from ["l1", "smooth_l1", "l2"]
+  #   loss_coef: 1.0 # didn't do any ablation study on this
+  # depth: # depth supervision
+  #   loss_type: l2 # choose from ["l1", "smooth_l1", "l2"]
+  #   enable: True # whether to use depth supervision
+  #   loss_coef: 1.0 # didn't do any ablation study on this
+  #   depth_error_percentile: null # placeholder for future use. lidar becomes less accurate when it's far away from the ego vehicle. we can use this to weight the depth supervision.
+  #   line_of_sight:
+  #     enable: True
+  #     loss_type: "my" # self-implemented line-of-sight loss
+  #     loss_coef: 0.1 # how about 0.01?
+  #     start_iter: 2000 # when to start using line-of-sight loss
+  #     # if your flow field is not accurate or collapsed, 
+  #     # you may want to use a stronger line-of-sight loss
+  #     # e.g., reduce start_epsilon to 3.0 and end_epsilon to 1.0
+  #     # but it will lower PSNR
+  #     start_epsilon: 6.0 # initial epsilon for line-of-sight loss
+  #     end_epsilon: 2.5 # final epsilon for line-of-sight loss
+  #     decay_steps: 5000 # how many steps to decay loss_coef
+  #     decay_rate: 0.5 # decay rate for loss_coef
+  # sky: # sky supervision
+  #   loss_type: opacity_based # choose from ["opacity_based", "weights_based"]
+  #   loss_coef: 0.001
+  # feature: # feature supervision
+  #   loss_type: l2 # choose from ["l1", "smooth_l1", "l2"]
+  #   loss_coef: 0.5 # didn't do any ablation study on this
+  dynamic: # dynamic regularization
+    loss_type: sparsity 
+    loss_coef: 0.001
+    # 0.01
+    # entropy_loss_skewness: 1.1 # TODO: we didn't study this yet
+  # shadow: # shadow regularization
+  #   loss_type: sparsity
+  #   loss_coef: 0.01

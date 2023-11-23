@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -24,30 +24,30 @@ from tqdm import tqdm
 
 #---------------- Cityscapes semantic segmentation
 cityscapes_classes = [
-    'road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
-    'traffic light', 'traffic sign', 'vegetation', 'terrain', 'sky',
-    'person', 'rider', 'car', 'truck', 'bus', 'train', 'motorcycle',
-    'bicycle'
+    "road", "sidewalk", "building", "wall", "fence", "pole",
+    "traffic light", "traffic sign", "vegetation", "terrain", "sky",
+    "person", "rider", "car", "truck", "bus", "train", "motorcycle",
+    "bicycle"
 ]
 cityscapes_classes_ind_map = {cn: i for i, cn in enumerate(cityscapes_classes)}
 
 cityscapes_dynamic_classes = [
-    'person', 'rider', 'car', 'truck', 'bus', 'train', 'motorcycle', 'bicycle'
+    "person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle"
 ]
 
 cityscapes_road_classes = [
-    'road', 'sidewalk', 'building', 'wall', 'fence', 'pole', 'traffic light', 'traffic sign'
+    "road", "sidewalk", "building", "wall", "fence", "pole", "traffic light", "traffic sign"
 ]
 
 cityscapes_human_classes = [
-    'person', 'rider'
+    "person", "rider"
 ]
 
-total_camera_dict = {cam:i for i, cam in enumerate(['front_left', 'front_right'])}
+total_camera_dict = {cam:i for i, cam in enumerate(["front_left", "front_right"])}
 
 def load_pickle(path):
-    with open(path, 'rb') as f:
-        return pickle.load(f, encoding='latin1')
+    with open(path, "rb") as f:
+        return pickle.load(f, encoding="latin1")
 
 def cal_shadow_mask(ret, ratio=[1.2, 1.0]):
     mask = ret.astype(np.uint8) * 255   # h,w
@@ -71,13 +71,15 @@ class PlusPixelSource(ScenePixelSource):
         start_timestep: int = 0,
         end_timestep: int = -1,
         device: torch.device = torch.device("cpu"),
-        pose_type: str = 'vio', 
+        pose_type: str = "vio", 
+        scene_id: str = None,
     ):
         super().__init__(pixel_data_config, device=device)
         self.data_path = data_path
         self.start_timestep = start_timestep
         self.end_timestep = end_timestep
         self.pose_type = pose_type
+        self.scene_id = scene_id
         self.create_all_filelist()
         self.load_data()
 
@@ -87,9 +89,9 @@ class PlusPixelSource(ScenePixelSource):
         e.g., img files, feature files, etc.
         """
         if self.num_cams == 1:
-            self.camera_list = ['front_left',]
+            self.camera_list = ["front_left",]
         elif self.num_cams == 2:
-            self.camera_list = ['front_left', 'front_right']
+            self.camera_list = ["front_left", "front_right"]
         else:
             raise NotImplementedError(
                 f"num_cams: {self.num_cams} not supported for plus dataset"
@@ -104,7 +106,7 @@ class PlusPixelSource(ScenePixelSource):
         for t in range(self.start_timestep, self.end_timestep):
             for cam_i in self.camera_list:
                 img_filepath = os.path.join(self.data_path, "images", cam_i, f"{t:06d}.png")
-                mask_filepath = os.path.join(self.data_path, "images", f'{cam_i}_mask', f"{t:06d}.npy")
+                mask_filepath = os.path.join(self.data_path, "images", f"{cam_i}_mask", f"{t:06d}.npy")
                 if os.path.exists(img_filepath):
                     img_filepaths.append(img_filepath)
                     selected_steps.append(t)
@@ -123,13 +125,13 @@ class PlusPixelSource(ScenePixelSource):
         # to store per-camera intrinsics and extrinsics
 
         # compute per-image poses and intrinsics
-        if self.pose_type == 'imu':
+        if self.pose_type == "imu":
             # imu ego pose
-            ego_poses_path = os.path.join(self.data_path, 'ego_pos_with_vel')
+            ego_poses_path = os.path.join(self.data_path, "ego_pos_with_vel")
             poses_imu_w_tracking = []
             for frame in range(len(os.listdir(ego_poses_path))):
                 info = load_pickle(os.path.join(ego_poses_path, ("%06d"%frame)+".pkl"))
-                poses_imu_w_tracking.append(info['ego_pose']) 
+                poses_imu_w_tracking.append(info["ego_pose"]) 
             poses_imu_w_tracking = np.array(poses_imu_w_tracking).astype(np.float64)
             pose0 = poses_imu_w_tracking[0].copy()
             poses_imu_w_tracking = np.linalg.inv(pose0) @ poses_imu_w_tracking
@@ -145,23 +147,23 @@ class PlusPixelSource(ScenePixelSource):
             for t in range(self.start_timestep, self.end_timestep):
                 for cam_i in self.camera_list:
                     cam_ids.append(total_camera_dict[cam_i])
-                    intrs.append(calib['P2'] if cam_i=='front_right' else calib['P1'])
+                    intrs.append(calib["P2"] if cam_i=="front_right" else calib["P1"])
                     
                     cam_i_imu = calib[f"Tr_cam_to_imu_{cam_i}"]
                     c2ws.append(poses_imu_w_tracking[t] @ cam_i_imu)
             cam_ids, intrs, c2ws = np.array(cam_ids), np.array(intrs), np.array(c2ws), 
 
-        elif self.pose_type == 'vio':
+        elif self.pose_type == "vio":
             import json
             opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
             data_file = os.path.join(self.data_path, "transforms.json")
             assert os.path.exists(data_file)
             with open(data_file) as f:
                 data = json.load(f)
-            frames = data['frames']
-            cam_ids = np.array([total_camera_dict[frame['cam_name']] for frame in frames])
-            intrs = np.array([frame['intr'] for frame in frames])
-            c2ws = np.array([frame['transform_matrix'] @ opencv2opengl for frame in frames]) # opengl to opencv
+            frames = data["frames"]
+            cam_ids = np.array([total_camera_dict[frame["cam_name"]] for frame in frames])
+            intrs = np.array([frame["intr"] for frame in frames])
+            c2ws = np.array([frame["transform_matrix"] @ opencv2opengl for frame in frames]) # opengl to opencv
 
         indices = self.selected_steps * self.num_cams
         for i in range(self.num_cams):
@@ -214,7 +216,7 @@ class PlusPixelSource(ScenePixelSource):
         ):
             raw = np.load(fname)
             ret = np.zeros_like(raw).astype(np.bool8)
-            ret[raw==cityscapes_classes_ind_map['sky']] = True
+            ret[raw==cityscapes_classes_ind_map["sky"]] = True
             # resize them to the load_size
             sky_mask = cv2.resize(ret.squeeze().astype(int), (self.data_cfg.load_size[1], self.data_cfg.load_size[0]))
             sky_masks.append(np.array(sky_mask) > 0)
@@ -335,13 +337,14 @@ class PlusDataset(SceneDataset):
         )
 
         if load_pixel:
-            # pose_type = self.data_cfg.pose_type if 'pose_type' in self.data_cfg
+            # pose_type = self.data_cfg.pose_type if "pose_type" in self.data_cfg
             pixel_source = PlusPixelSource(
                 self.data_cfg.pixel_source,
                 self.data_path,
                 self.start_timestep,
                 self.end_timestep,
                 device=self.device,
+                scene_id=self.scene_idx,
             )
             pixel_source.to(self.device)
             # collect img timestamps
@@ -561,26 +564,6 @@ class PlusDataset(SceneDataset):
             save_seperate_video=False,
         )
 
-class ConcatDataSource(ConcatDataset):
-    def __init__(self, datasets):
-        super(ConcatDataSource, self).__init__(datasets)
-
-    def get_dataset_idx(self, idx):
-        """
-        获取索引为 idx 的样本所属的原始数据集索引
-        """
-        cumulative_sizes = [0] + self.cumulative_sizes
-        for i, size in enumerate(cumulative_sizes[:-1]):
-            if idx >= size and idx < cumulative_sizes[i + 1]:
-                return i
-        raise ValueError("Index out of range")
-    
-    def get_scene_id(self, idx):
-        scene_idx = self.get_dataset_idx(idx)
-        if hasattr(self.datasets[scene_idx], 'scene_id'):
-            return getattr(self.datasets[scene_idx], 'scene_id')
-        else:
-            return ""
         
 class ScenarioDataset(SceneDataset):
     dataset: str = "plus"
@@ -597,7 +580,7 @@ class ScenarioDataset(SceneDataset):
         aabb_min, aabb_max = -1*torch.ones(3), torch.ones(3)
         if "scenarios" in data_cfg:
             for scenario_cfg_str in data_cfg.scenarios:
-                _scene_id, start, stop = [it.strip(' ') for it in scenario_cfg_str.split(',')]
+                _scene_id, start, stop = [it.strip(" ") for it in scenario_cfg_str.split(",")]
                 cfg = data_cfg.copy()
                 cfg.scene_idx = _scene_id
                 cfg.start_timestep, cfg.end_timestep = int(start), int(stop)
@@ -613,10 +596,10 @@ class ScenarioDataset(SceneDataset):
 
         self.pixel_source = {scene_id: dataset.pixel_source for scene_id, dataset in self.scenes.items()}
         self.lidar_source = {scene_id: dataset.pixel_source for scene_id, dataset in self.scenes.items()}
-    
+
     @property
     def num_cams(self) -> int:
-        return next(iter(self.pixel_source.values())).num_cams
+        return self.data_cfg.pixel_source.num_cams
 
     @property
     def num_train_timesteps(self) -> Dict[str, int]:
@@ -632,23 +615,21 @@ class ScenarioDataset(SceneDataset):
     @property
     def num_img_timesteps(self) -> Dict[str, int]:
         return {scene_id: dataset.pixel_source.num_timesteps for scene_id, dataset in self.scenes.items()}
-
+    
     def build_split_wrapper(self):
         """
-        Makes each data source as a Pytorch Dataset
+        Concat SplitWrapper(Pytorch Dataset) from different scenes
         """
-        names = ['train_pixel_set', 'test_pixel_set', 'full_pixel_set', 'train_lidar_set', 'test_lidar_set', 'full_lidar_set']
-        self.train_pixel_set, self.test_pixel_set, self.full_pixel_set = [], [], []
-        self.train_lidar_set, self.test_lidar_set, self.full_lidar_set = [], [], []
+        names = ["train_pixel_set", "test_pixel_set", "full_pixel_set", "train_lidar_set", "test_lidar_set", "full_lidar_set"]
 
         for name in names:
+            setattr(self, name, [])
             for scene_id, dataset in self.scenes.items():
                 if hasattr(dataset, name) and getattr(dataset, name) is not None:
                     data = getattr(dataset, name)
-                    setattr(data, 'scene_id', scene_id)
                     getattr(self, name).append(data)
             concat_dataset = getattr(self, name)
-            concat_dataset = ConcatDataSource(concat_dataset) if len(concat_dataset) > 0 else None
+            concat_dataset = ConcatSplitWrapper(concat_dataset) if len(concat_dataset) > 0 else None
             setattr(self, name, concat_dataset)
                 
     def build_data_source(self):
@@ -677,3 +658,26 @@ class ScenarioDataset(SceneDataset):
         # for scene_id, dataset in scenarios:
         #     save_pth = os.path.join(cfg.log_dir, f"{scene_id}_data.mp4")
         pass
+
+
+class ConcatSplitWrapper(ConcatDataset):
+    def __init__(self, datasets: List[SplitWrapper]):
+        super(ConcatSplitWrapper, self).__init__(datasets)
+
+    def get_dataset_idx(self, idx):
+        """
+        获取索引为 idx 的样本所属的原始数据集索引
+        """
+        cumulative_sizes = [0] + self.cumulative_sizes
+        for i, size in enumerate(cumulative_sizes[:-1]):
+            if idx >= size and idx < cumulative_sizes[i + 1]:
+                return i
+        raise ValueError("Index out of range")
+    
+    def get_scene_id(self, idx):
+        dataset_idx = self.get_dataset_idx(idx)
+        datasource = self.datasets[dataset_idx].datasource
+        if hasattr(datasource, "scene_id"):
+            return getattr(datasource, "scene_id")
+        else:
+            return ""

@@ -472,6 +472,8 @@ def visualize_voxels(
         for p in proposal_networks:
             p.eval()
 
+    enable_feature = cfg.data.pixel_source.load_features and cfg.nerf.model.head.enable_feature_head
+
     vis_voxel_aabb = torch.tensor(model.aabb, device=device)
     # slightly expand the aabb to make sure all points are covered
     vis_voxel_aabb[1:3] -= 1
@@ -516,12 +518,13 @@ def visualize_voxels(
                     cfg=cfg,
                     proposal_requires_grad=False,
                 )
-            if "dino_pe_free" in render_results:
-                dino_feats = render_results["dino_pe_free"]
-            else:
-                dino_feats = render_results["dino_feat"]
-            dino_feats = dino_feats.reshape(-1, dino_feats.shape[-1])
-            to_compute_pca_patches.append(dino_feats)
+            if enable_feature:
+                if "dino_pe_free" in render_results:
+                    dino_feats = render_results["dino_pe_free"]
+                else:
+                    dino_feats = render_results["dino_feat"]
+                dino_feats = dino_feats.reshape(-1, dino_feats.shape[-1])
+                to_compute_pca_patches.append(dino_feats)
         # query the depth. we force a lidar mode here so that the renderer will skip
         # querying other features such as colors, features, etc.
         data_dict["lidar_origins"] = data_dict["origins"].to(device)
@@ -602,10 +605,11 @@ def visualize_voxels(
                 empty_dynamic_voxels = torch.zeros(
                     *dynamic_voxel_resolution, device=device
                 )
-    # compute the pca reduction
-    dummy_pca_reduction, color_min, color_max = get_robust_pca(
-        torch.cat(to_compute_pca_patches, dim=0).to(device), m=2.5
-    )
+    if enable_feature:
+        # compute the pca reduction
+        dummy_pca_reduction, color_min, color_max = get_robust_pca(
+            torch.cat(to_compute_pca_patches, dim=0).to(device), m=2.5
+        )
     # now let's query the features
     all_occupied_static_points = voxel_coords_to_world_coords(
         aabb_min, aabb_max, static_voxel_resolution, torch.nonzero(empty_static_voxels)
@@ -639,15 +643,18 @@ def visualize_voxels(
         if len(occupied_points_chunk) == 0:
             # skip if no occupied points in this chunk
             continue
-        with torch.no_grad():
-            feats = model.forward(
-                occupied_points_chunk,
-                query_feature_head=True,
-                query_pe_head=False,
-            )["dino_feat"]
-        colors = feats @ dummy_pca_reduction
-        del feats
-        colors = (colors - color_min) / (color_max - color_min)
+        if enable_feature:
+            with torch.no_grad():
+                feats = model.forward(
+                    occupied_points_chunk,
+                    query_feature_head=True,
+                    query_pe_head=False,
+                )["dino_feat"]
+            colors = feats @ dummy_pca_reduction
+            del feats
+            colors = (colors - color_min) / (color_max - color_min)
+        else:
+            colors = torch.ones_like(occupied_points_chunk)
         pca_colors.append(torch.clamp(colors, 0, 1))
         occupied_points.append(occupied_points_chunk)
 
@@ -682,16 +689,20 @@ def visualize_voxels(
             normed_timestamps = unq_timestamps[i].repeat(
                 occupied_points_chunk.shape[0], 1
             )
-            with torch.no_grad():
-                feats = model.forward(
-                    occupied_points_chunk,
-                    data_dict={"normed_timestamps": normed_timestamps},
-                    query_feature_head=True,
-                    query_pe_head=False,
-                )["dynamic_dino_feat"]
-            colors = feats @ dummy_pca_reduction
-            del feats
-            colors = (colors - color_min) / (color_max - color_min)
+            if enable_feature:
+                with torch.no_grad():
+                    feats = model.forward(
+                        occupied_points_chunk,
+                        data_dict={"normed_timestamps": normed_timestamps},
+                        query_feature_head=True,
+                        query_pe_head=False,
+                    )["dynamic_dino_feat"]
+                colors = feats @ dummy_pca_reduction
+                del feats
+                colors = (colors - color_min) / (color_max - color_min)
+            else:
+                colors = np.zeros_like(occupied_points_chunk)
+                colors[:, 1] = 1    # green
             dynamic_pca_colors.append(torch.clamp(colors, 0, 1))
             dynamic_occupied_points.append(occupied_points_chunk)
         dynamic_coords = [x.cpu().numpy() for x in dynamic_occupied_points]

@@ -146,6 +146,7 @@ def setup(args):
         "metrics",
         "configs_bk",
         "buffer_maps",
+        "novel"
     ]:
         os.makedirs(os.path.join(log_dir, folder), exist_ok=True)
     # ------ setup logging -------- #
@@ -465,50 +466,47 @@ def render_novel(
         roll = np.radians(roll)
         pitch = np.radians(pitch)
         yaw = np.radians(yaw)
-
-        Rx = np.array([[1, 0, 0],
-                    [0, np.cos(roll), -np.sin(roll)],
-                    [0, np.sin(roll), np.cos(roll)]])
-
-        Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
-                    [0, 1, 0],
-                    [-np.sin(pitch), 0, np.cos(pitch)]])
-
-        Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
-                    [np.sin(yaw), np.cos(yaw), 0],
-                    [0, 0, 1]])
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(roll), -np.sin(roll)],
+            [0, np.sin(roll), np.cos(roll)],
+        ])
+        Ry = np.array([
+            [np.cos(pitch), 0, np.sin(pitch)],
+            [0, 1, 0],
+            [-np.sin(pitch), 0, np.cos(pitch)],
+        ])
+        Rz = np.array([
+            [np.cos(yaw), -np.sin(yaw), 0], 
+            [np.sin(yaw), np.cos(yaw), 0], 
+            [0, 0, 1]
+        ])
 
         R = np.dot(Rz, np.dot(Ry, Rx))
         ret[:3, :3] = R
         return ret
 
     if args.nvs_param is not None:
-        roll, pitch, yaw = [float(i) for i in args.nvs_param.split(',')]
-        novel_trans = rotation_matrix(roll, pitch, yaw)
+        roll, pitch, yaw = [float(i) for i in args.nvs_param.split(",")]
+        novel_trans = torch.from_numpy(rotation_matrix(roll, pitch, yaw)).type(torch.FloatTensor).to(model.device)
 
-    if cfg.data.pixel_source.load_rgb and cfg.render.render_low_res:
-        logger.info("Rendering full set but in a low_resolution...")
-        if isinstance(dataset.pixel_source, dict):
-            for _, pixel_source in dataset.pixel_source.items():
-                pixel_source.cam_to_worlds = pixel_source.cam_to_worlds @ torch.from_numpy(novel_trans).type(torch.FloatTensor)
-                pixel_source.update_downscale_factor(1 / cfg.render.low_res_downscale)
-        else:
-            dataset.pixel_source.update_downscale_factor(1 / cfg.render.low_res_downscale)
+    video_output_pth = os.path.join(cfg.log_dir, "novel", "novel.mp4")
+    novel_image_pth = os.path.join(cfg.log_dir, "novel", "images")
+    os.makedirs(novel_image_pth, exist_ok=True)
+
+    if cfg.data.pixel_source.load_rgb:
+        logger.info("Rendering full set ...")
+        for _, pixel_source in dataset.pixel_source.items():
+            pixel_source.cam_to_worlds = pixel_source.cam_to_worlds @ novel_trans
         render_results = render_pixels(
             cfg=cfg,
             model=model,
             proposal_networks=proposal_networks,
             proposal_estimator=proposal_estimator,
             dataset=dataset.full_pixel_set,
-            compute_metrics=True,
             return_decomposition=True,
+            save_path=novel_image_pth
         )
-        if isinstance(dataset.pixel_source, dict):
-            for _, pixel_source in dataset.pixel_source.items():
-                pixel_source.reset_downscale_factor()
-        else:
-            dataset.pixel_source.reset_downscale_factor()
-        video_output_pth = os.path.join(cfg.log_dir, "novel.mp4")
         vis_frame_dict = save_videos(
             render_results,
             video_output_pth,
@@ -534,18 +532,18 @@ def main(args):
         from datasets.waymo import WaymoDataset
 
         dataset = WaymoDataset(data_cfg=cfg.data)
-    elif cfg.data.dataset == 'nuscenes':
+    elif cfg.data.dataset == "nuscenes":
         from datasets.nuscenes import NuScenesDataset
 
         dataset = NuScenesDataset(data_cfg=cfg.data)    
-    elif cfg.data.dataset == 'plus':
+    elif cfg.data.dataset == "plus":
         from datasets.plus import PlusDataset, ScenarioDataset
-        if 'scenarios' in cfg.data:
+        if "scenarios" in cfg.data:
             dataset = ScenarioDataset(data_cfg=cfg.data)
         else:
-            dataset = PlusDataset(data_cfg=cfg.data)         
+            dataset = PlusDataset(data_cfg=cfg.data)
     else:
-        raise NotImplementedError('Error data type')
+        raise NotImplementedError("Error data type")
 
     # To give us a quick preview of the scene, we render a data video
     if args.render_data_video or args.render_data_video_only:
@@ -749,8 +747,9 @@ def main(args):
             for k, v in pixel_data_dict.items():
                 if isinstance(v, torch.Tensor):
                     pixel_data_dict[k] = v.cuda(non_blocking=True)
-            scene_id = dataset.train_pixel_set.get_scene_id(i)
-            pixel_data_dict['scene_id'] = scene_id
+            if hasattr(dataset.train_pixel_set, "datasets"):
+                scene_id = dataset.train_pixel_set.get_scene_id(i)
+                pixel_data_dict["scene_id"] = scene_id
 
             # ------ pixel-wise supervision -------- #
             render_results = render_rays(
@@ -773,7 +772,7 @@ def main(args):
             )
             if sky_loss_fn is not None:  # if sky loss is enabled
                 if cfg.supervision.sky.loss_type == "weights_based":
-                    # penalize the points' weights if they point to the sky
+                    # penalize the points weights if they point to the sky
                     pixel_loss_dict.update(
                         sky_loss_fn(
                             render_results["extras"]["weights"],
@@ -963,6 +962,7 @@ def main(args):
         metric_logger.update(**{k: v.item() for k, v in pixel_loss_dict.items()})
         metric_logger.update(**{k: v.item() for k, v in lidar_loss_dict.items()})
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        # metric_logger.update(**{f"lr_{i}": param["lr"] for i, param in enumerate(optimizer.param_groups)})
         if stats is not None:
             metric_logger.update(**{k: v.item() for k, v in stats.items()})
         if epsilon is not None:
@@ -1116,24 +1116,33 @@ def main(args):
                     for k, v in vis_frame_dict.items():
                         wandb.log({"pixel_rendering/" + k: wandb.Image(v)})
                 if cfg.data.pixel_source.sampler.buffer_ratio > 0:
+                    tmp_id = ""
                     if isinstance(dataset.pixel_source, dict):
                         for id, pixel_source in dataset.pixel_source.items():
-                            vis_frame = pixel_source.visualize_pixel_sample_weights(
-                                [
-                                    vis_timestep * dataset.num_cams + i
-                                    for i in range(dataset.num_cams)
-                                ]
+                            if vis_timestep >= pixel_source.num_timesteps:
+                                vis_timestep -= pixel_source.num_timesteps
+                            else:
+                                vis_frame = pixel_source.visualize_pixel_sample_weights(
+                                    [
+                                        vis_timestep * dataset.num_cams + i
+                                        for i in range(dataset.num_cams)
+                                    ]
+                                )
+                                tmp_id = id; break
+                        if tmp_id == "":
+                            import warnings
+                            warnings.warn("vis_timestep mismatch dataset len",)  
+                        else:
+                            imageio.imwrite(
+                                os.path.join(
+                                    cfg.log_dir, "buffer_maps", f"{tmp_id}_buffer_map_{step}.png"
+                                ),
+                                vis_frame,
                             )
-                        imageio.imwrite(
-                            os.path.join(
-                                cfg.log_dir, "buffer_maps", f"{id}_buffer_map_{step}.png"
-                            ),
-                            vis_frame,
-                        )
-                        if args.enable_wandb:
-                            wandb.log(
-                                {f"pixel_rendering/buffer_map/{id}": wandb.Image(vis_frame)}
-                            )
+                            if args.enable_wandb:
+                                wandb.log(
+                                    {f"pixel_rendering/buffer_map/{tmp_id}": wandb.Image(vis_frame)}
+                                )
                     else:
                         vis_frame = dataset.pixel_source.visualize_pixel_sample_weights(
                                 [

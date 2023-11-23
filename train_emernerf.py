@@ -146,6 +146,7 @@ def setup(args):
         "metrics",
         "configs_bk",
         "buffer_maps",
+        "novel"
     ]:
         os.makedirs(os.path.join(log_dir, folder), exist_ok=True)
     # ------ setup logging -------- #
@@ -476,23 +477,24 @@ def render_novel(
 
     if args.nvs_param is not None:
         roll, pitch, yaw = [float(i) for i in args.nvs_param.split(',')]
-        novel_trans = rotation_matrix(roll, pitch, yaw)
+        novel_trans = torch.from_numpy(rotation_matrix(roll, pitch, yaw)).type(torch.FloatTensor).to(model.device)
 
-    if cfg.data.pixel_source.load_rgb and cfg.render.render_low_res:
-        logger.info("Rendering full set but in a low_resolution...")
-        dataset.pixel_source.cam_to_worlds = dataset.pixel_source.cam_to_worlds @ torch.from_numpy(novel_trans).type(torch.FloatTensor).cuda()
-        dataset.pixel_source.update_downscale_factor(1 / cfg.render.low_res_downscale)
+    video_output_pth = os.path.join(cfg.log_dir, "novel", "novel.mp4")
+    novel_image_pth = os.path.join(cfg.log_dir, "novel", "images")
+    os.makedirs(novel_image_pth, exist_ok=True)
+
+    if cfg.data.pixel_source.load_rgb:
+        logger.info("Rendering full set ...")
+        dataset.pixel_source.cam_to_worlds = dataset.pixel_source.cam_to_worlds @ novel_trans
         render_results = render_pixels(
             cfg=cfg,
             model=model,
             proposal_networks=proposal_networks,
             proposal_estimator=proposal_estimator,
             dataset=dataset.full_pixel_set,
-            compute_metrics=True,
             return_decomposition=True,
+            save_path=novel_image_pth
         )
-        dataset.pixel_source.reset_downscale_factor()
-        video_output_pth = os.path.join(cfg.log_dir, "novel.mp4")
         vis_frame_dict = save_videos(
             render_results,
             video_output_pth,
@@ -576,27 +578,28 @@ def main(args):
 
     if args.visualize_voxel:
         # or args.eval_only:
-        if cfg.nerf.model.head.enable_flow_branch:
-            logger.info("Visualizing scene flow...")
-            visualize_scene_flow(
-                cfg=cfg,
-                model=model,
-                dataset=dataset,
-                device=device,
-            )
-        if cfg.nerf.model.head.enable_feature_head:
-            logger.info("Visualizing voxel features...")
-            visualize_voxels(
-                cfg,
-                model,
-                proposal_estimator,
-                proposal_networks,
-                dataset,
-                device=device,
-                save_html=True,
-                is_dynamic=cfg.nerf.model.head.enable_dynamic_branch,
-            )
+        # if cfg.nerf.model.head.enable_flow_branch:
+        #     logger.info("Visualizing scene flow...")
+        #     visualize_scene_flow(
+        #         cfg=cfg,
+        #         model=model,
+        #         dataset=dataset,
+        #         device=device,
+        #     )
+        # if cfg.nerf.model.head.enable_feature_head:
+        logger.info("Visualizing voxel features...")
+        visualize_voxels(
+            cfg,
+            model,
+            proposal_estimator,
+            proposal_networks,
+            dataset,
+            device=device,
+            save_html=True,
+            is_dynamic=cfg.nerf.model.head.enable_dynamic_branch,
+        )
         logger.info("Visualization done!")
+        exit()  
 
     if args.eval_only:
         if args.nvs_param is not None:

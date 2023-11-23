@@ -56,6 +56,7 @@ def render_pixels(
     compute_metrics: bool = False,
     vis_indices: Optional[List[int]] = None,
     return_decomposition: bool = True,
+    save_path: str = None
 ):
     """
     Render pixel-related outputs from a model.
@@ -87,6 +88,7 @@ def render_pixels(
         model=model,
         compute_metrics=compute_metrics,
         vis_indices=vis_indices,
+        save_path=save_path
     )
     if compute_metrics:
         num_samples = len(dataset) if vis_indices is None else len(vis_indices)
@@ -107,6 +109,7 @@ def render(
     model: Optional[RadianceField] = None,
     compute_metrics: bool = False,
     vis_indices: Optional[List[int]] = None,
+    save_path: str = None
 ):
     """
     Renders a dataset utilizing a specified render function.
@@ -149,14 +152,13 @@ def render(
         masked_psnrs, masked_ssims = [], []
         masked_feat_psnrs = []
 
-    from torch.utils.data import ConcatDataset
     with torch.no_grad():
         indices = vis_indices if vis_indices is not None else range(len(dataset))
         computed = False
-        split = dataset.split if not isinstance(dataset, ConcatDataset) else dataset.datasets[0].split
+        split = dataset.split if not hasattr(dataset, 'datasets') else dataset.datasets[0].split
         for i in tqdm(indices, desc=f"rendering {split}", dynamic_ncols=True):
             data_dict = dataset[i]
-            if isinstance(dataset, ConcatDataset):
+            if hasattr(dataset, 'datasets'):
                 scene_id = dataset.get_scene_id(i)
                 data_dict['scene_id'] = scene_id
             for k, v in data_dict.items():
@@ -164,6 +166,12 @@ def render(
                     if k not in ['scene_id']:
                         data_dict[k] = v.cuda(non_blocking=True)
             results = render_func(data_dict)
+            # -------- save image -------- #
+            if save_path is not None:
+                cur_time = i // dataset.datasource.num_cams + dataset.datasource.start_timestep
+                cur_cam = dataset.datasource.camera_list[i % dataset.datasource.num_cams]
+                name = f'{int(cur_time):06d}_{cur_cam}'
+                imageio.imwrite(f'{save_path}/{name}.png',to8b(results['rgb']))
             # ------------- rgb ------------- #
             rgb = results["rgb"]
             rgbs.append(get_numpy(rgb))
@@ -235,6 +243,7 @@ def render(
                                 full=True,
                             )[1][dynamic_mask].mean()
                         )
+            
 
             # -------------- dino ------------- #
             if "dino_feat" in results:

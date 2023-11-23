@@ -354,7 +354,7 @@ def render_rays(
     results = []
     chunk = 2**24 if radiance_field.training else cfg.render.render_chunk_size
     for i in range(0, num_rays, chunk):
-        chunk_data_dict = {k: v[i : i + chunk] for k, v in reshaped_data_dict.items() if k !='scene_id' }
+        chunk_data_dict = {k: v[i : i + chunk] for k, v in reshaped_data_dict.items() if k not in ['scene_id'] }
         if 'scene_id' in reshaped_data_dict:
             chunk_data_dict['scene_id'] = reshaped_data_dict['scene_id']
         assert proposal_networks is not None, "proposal_networks is required."
