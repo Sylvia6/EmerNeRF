@@ -16,6 +16,7 @@ from visual_odom.utils import make_dir, extract_point_cloud, generate_obstacle_m
 from visual_odom.core import Frame, load_frame, save_frame
 import torch.nn.functional as F
 from plus_general.csrc.common_proto_py.perception import obstacle_detection_pb2
+from plus_general.csrc.common_proto_py.localization import localization_pb2
 from visual_odom.utils import PathManager, get_stereo_calibrator
 from plus_general.utils.config_utils2 import CfgNode
 import pickle
@@ -23,12 +24,12 @@ import plus_general.utils.calibration_utils as calibration_utils
 
 
 def save_pickle(obj, path):
-    with open(path, 'wb') as f:
+    with open(path, "wb") as f:
         pickle.dump(obj, f)
 
 
 def load_pickle(path):
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         return pickle.load(f)
 
 
@@ -49,9 +50,9 @@ def get_video_writer(save_path):
 
 
 def convert_boolstr(v):
-    if v.lower() == 'true':
+    if v.lower() == "true":
         return True
-    elif v.lower() == 'false':
+    elif v.lower() == "false":
         return False
     else:
         raise TypeError("{} is not a valid bool string".format(v))
@@ -68,7 +69,7 @@ class PipelineCfg(CfgNode):
         self.first_pose_as_identity = False
         self.vis_track = False
         self.skip_cached_pipeline = False
-        self.global_cloud = False
+        self.global_cloud = True
         self.global_cloud_spatial_stride = 3
         self.global_cloud_roi = [-15, 15, -5, 10, 20, 60]
         self.optimize_step = 10
@@ -79,7 +80,7 @@ class PipelineCfg(CfgNode):
         self.check_skip_flag = False
         self.skip_flag = False
         self.use_obs_mask = True
-        self.cameras = ['front_left', 'front_right']
+        self.cameras = ["front_left", "front_right"]
         self.nerf = False
 
     def generate_aug(self):
@@ -87,7 +88,7 @@ class PipelineCfg(CfgNode):
         parser = argparse.ArgumentParser()
         for k, v in self.items():
             if isinstance(v, list):
-                parser.add_argument('--{}'.format(k), nargs='+', type=int, default=v)
+                parser.add_argument("--{}".format(k), nargs="+", type=int, default=v)
             elif isinstance(v, bool):
                 parser.add_argument("--{}".format(k), type=convert_boolstr, default=v)
             elif isinstance(v, int):
@@ -115,12 +116,12 @@ class CalibrationFileManager(object):
     def __init__(self, calib_db_root):
         self.calib_db_root = calib_db_root
         calib_files = os.listdir(calib_db_root)
-        self.calib_files = [file for file in calib_files if file.endswith('.yml')]
+        self.calib_files = [file for file in calib_files if file.endswith(".yml")]
 
     def build_calibrator(self, bagname, calib_names, full_res=False):
         bagname = os.path.basename(bagname)
-        car_name = bagname.split('_')[1]
-        date = int(bagname.split('_')[0].split('T')[0])
+        car_name = bagname.split("_")[1]
+        date = int(bagname.split("_")[0].split("T")[0])
 
         last_date_dict = {}
         dst_file_dict = {}
@@ -128,15 +129,15 @@ class CalibrationFileManager(object):
             if file.find(car_name) == -1:
                 continue
 
-            if 'T' in file.split('_')[1]:
-                file_calib_date = int(file.split('_')[1].split('T')[0])
+            if "T" in file.split("_")[1]:
+                file_calib_date = int(file.split("_")[1].split("T")[0])
             else:
-                file_calib_date = int(file.split('_')[1])
+                file_calib_date = int(file.split("_")[1])
 
-            date_key_words = file.split('_')[1]
+            date_key_words = file.split("_")[1]
 
             for calib_name in calib_names:
-                search_key = str(date_key_words) + '_' + calib_name
+                search_key = str(date_key_words) + "_" + calib_name
                 if file.find(search_key) != -1:
                     if file_calib_date <= date:
                         if calib_name not in last_date_dict or last_date_dict[calib_name] < file_calib_date:
@@ -144,11 +145,11 @@ class CalibrationFileManager(object):
                             dst_file_dict[calib_name] = os.path.join(self.calib_db_root, file)
 
         mappping = {
-            'front_left_right': 'stereo',
-            'rear_left_camera': 'rear_left',
-            'rear_right_camera': 'rear_right',
-            'side_left_camera': 'side_left',
-            'side_right_camera': 'side_right',
+            "front_left_right": "stereo",
+            "rear_left_camera": "rear_left",
+            "rear_right_camera": "rear_right",
+            "side_left_camera": "side_left",
+            "side_right_camera": "side_right",
         }
 
         calib_keys = []
@@ -192,48 +193,46 @@ class Pipeline(object):
 
     def save_pipeline_cache(self):
         pipeline_cache_path = self.path_manager.join_root("pipeline_cache.json")
-        with open(pipeline_cache_path, 'w') as f:
+        with open(pipeline_cache_path, "w") as f:
             json.dump(self.pipeline_cache, f)
 
     @cache_pipeline
     def track(self):
-        mask_save_dir = self.path_manager.join_root('box_masks')
+        mask_save_dir = self.path_manager.join_root("box_masks")
         cam_mask_dirs = [os.path.join(mask_save_dir, cam) for cam in self.cfg.cameras]
         for cam_mask_dir in cam_mask_dirs:
             os.makedirs(cam_mask_dir, exist_ok=True)
 
         from visual_odom.track.tracker import StereoTracker
-        obstacle_topic = '/perception/obstacles'
+        obstacle_topic = "/perception/obstacles"
         if self.cfg.use_obs_mask:
             other_topics = [obstacle_topic]
         else:
             other_topics = None
         bag_handler = ImageBagHandler(self.path_manager.bag_name, front_left=True, front_right=True,
                                       odom=True, other_topics=other_topics)
-        # bag_handler = ImageBagHandler(self.path_manager.bag_name, front_left=True, front_right=True,
-        #                               odom=True)
         if self.cfg.vis_track:
             video_writer = get_video_writer(self.path_manager.join_root("track_video.mp4"))
         tracker = StereoTracker(self.path_manager.stereo_cache_root, self.cfg.track_save_stride)
         tracker.max_cz = 200
         tracker.cx_range = [-10, 10]
         tracker.init_cam(
-            self.calibrator.calib_params_dict['stereo']['P1'],
-            self.calibrator.calib_params_dict['stereo']['P2'],
-            self.calibrator.calib_params_dict['stereo']['Tr_cam_to_imu'],
-            self.calibrator.calib_params_dict['stereo']['Q'],
+            self.calibrator.calib_params_dict["stereo"]["P1"],
+            self.calibrator.calib_params_dict["stereo"]["P2"],
+            self.calibrator.calib_params_dict["stereo"]["Tr_cam_to_imu"],
+            self.calibrator.calib_params_dict["stereo"]["Q"],
             0.52
         )
         first_pose = None
         for idx, msg_dict in enumerate(tqdm.tqdm(bag_handler.msg_generator(to_image=True, process_odom=True))):
             if self.cfg.max_track_frame is not None and idx > self.cfg.max_track_frame:
                 break
-            left = msg_dict['front_left'].message
-            left_unwarp = self.calibrator.unwarp(left, 'stereo', 0)
-            right = msg_dict['front_right'].message
-            right_unwarp = self.calibrator.unwarp(right, 'stereo', 1)
-            left_image_timestamp = msg_dict['front_left'].timestamp.to_sec()
-            imu_to_world, pose = msg_dict['imu_to_world'], msg_dict['pose']
+            left = msg_dict["front_left"].message
+            left_unwarp = self.calibrator.unwarp(left, "stereo", 0)
+            right = msg_dict["front_right"].message
+            right_unwarp = self.calibrator.unwarp(right, "stereo", 1)
+            left_image_timestamp = msg_dict["front_left"].timestamp.to_sec()
+            imu_to_world, pose = msg_dict["imu_to_world"], msg_dict["pose"]
 
             if self.cfg.first_pose_as_identity:
                 if first_pose is None:
@@ -250,7 +249,7 @@ class Pipeline(object):
             
             # for streetsurf mask
             rgb_mask = mask * 255
-            cv2.imwrite(os.path.join(mask_save_dir, 'front_left', f'{idx:06d}.png'), rgb_mask)
+            cv2.imwrite(os.path.join(mask_save_dir, "front_left", f"{idx:06d}.png"), rgb_mask)
 
             data = {
                 "left": left_unwarp,
@@ -267,18 +266,18 @@ class Pipeline(object):
             save_frame(frame, save_path)
 
         if self.cfg.first_pose_as_identity:
-            save_pickle(first_pose, self.path_manager.join_root('first_pose.pkl'))
+            save_pickle(first_pose, self.path_manager.join_root("first_pose.pkl"))
         
     @cache_pipeline
     def pose_estimate(self):
         from visual_odom.estimator import PoseEstimator
         cam_params = {
-            "p": np.array(self.calibrator.calib_params_dict['stereo']['P1']),
-            "b": np.linalg.norm(np.array(self.calibrator.calib_params_dict['stereo']['T'])),
+            "p": np.array(self.calibrator.calib_params_dict["stereo"]["P1"]),
+            "b": np.linalg.norm(np.array(self.calibrator.calib_params_dict["stereo"]["T"])),
         }
-        cam_params["bf"] = cam_params['p'][0, 0] * cam_params['b']
+        cam_params["bf"] = cam_params["p"][0, 0] * cam_params["b"]
 
-        frame_files = get_file(self.path_manager.frame_root, ['.pkl'])
+        frame_files = get_file(self.path_manager.frame_root, [".pkl"])
         frames = []
         for file in frame_files:
             frame = load_frame(file)
@@ -309,14 +308,14 @@ class Pipeline(object):
 
             image = cv2.imread(im_path)
             disp_data = np.load(mat_path)
-            Q = disp_data['q']
-            disp = disp_data['disp'].astype('float32')
+            Q = disp_data["q"]
+            disp = disp_data["disp"].astype("float32")
             scale = image.shape[1] / float(disp.shape[1])
             disp = F.interpolate(torch.from_numpy(disp)[None].unsqueeze(1), size=image.shape[:2],
-                                 mode='bilinear',
+                                 mode="bilinear",
                                  align_corners=True).squeeze(1)[0].numpy()
             disp *= scale
-            mat_3d = cv2.reprojectImageTo3D(disp.astype('float32'), Q)
+            mat_3d = cv2.reprojectImageTo3D(disp.astype("float32"), Q)
             dst_size = None
             points_3d, points_color = extract_single_point_cloud(image, mat_3d, pose=None, mask=None,
                                                                  dst_size=dst_size,
@@ -333,11 +332,11 @@ class Pipeline(object):
 
     def get_calibrator(self):
         calibrator = Calibrator.from_bag_message(self.path_manager.bag_name)
-        if 'stereo' not in calibrator.calib_params_dict:
+        if "stereo" not in calibrator.calib_params_dict:
             if self.calibrator_manager is None:
                 self.calibrator_manager = CalibrationFileManager(self.cfg.calib_db_root)
-            calib_names = ['front_left_right', 'rear_left_camera', 'rear_right_camera',
-                           'side_left_camera', 'side_right_camera']
+            calib_names = ["front_left_right", "rear_left_camera", "rear_right_camera",
+                           "side_left_camera", "side_right_camera"]
             calibrator = self.calibrator_manager.build_calibrator(self.path_manager.bag_name, calib_names)
         return calibrator
 
@@ -350,26 +349,33 @@ class Pipeline(object):
         for path in path_to_remove:
             if os.path.exists(path):
                 shutil.rmtree(path)
-        self.pipeline_cache['track'] = False
+        self.pipeline_cache["track"] = False
         self.save_pipeline_cache()
 
     def generate_nerf_data(self):
-        print('Generating nerf data.')
+        print("Generating nerf data.")
         pose_results = load_pickle(self.path_manager.pose_path)
         pose_dict = {}
         for idx, ts, pose in pose_results:
             pose_dict[ts] = pose
-        bag_handler = ImageBagHandler(self.path_manager.bag_name, front_left=True, front_right=True)
+        
+        localization_topic = "/localization/state"
+        other_topics = [localization_topic]
+        bag_handler = ImageBagHandler(self.path_manager.bag_name, front_left=True, front_right=True,
+                                      odom=True, other_topics=other_topics)
+        
+        # # 世界坐标系
+        # bag_handler.odom_topic = "/plus/odom"
+        # bag_handler.bag_handler.set_odom_topics(["/plus/odom"])
 
-        h, w = self.calibrator.calib_params_dict['stereo']['height'], self.calibrator.calib_params_dict['stereo']['width']
-        p1 = np.array(self.calibrator.calib_params_dict['stereo']['P1'])
-        p2 = np.array(self.calibrator.calib_params_dict['stereo']['P2'])
+        h, w = self.calibrator.calib_params_dict["stereo"]["height"], self.calibrator.calib_params_dict["stereo"]["width"]
+        p1 = np.array(self.calibrator.calib_params_dict["stereo"]["P1"])
+        p2 = np.array(self.calibrator.calib_params_dict["stereo"]["P2"])
         cam_t = p2[0, 3] / p2[0, 0]
         cam_t_pose = np.eye(4)
         cam_t_pose[0, 3] = cam_t
 
-
-        image_save_dir = self.path_manager.join_root('images')
+        image_save_dir = self.path_manager.join_root("images")
         cam_dirs = [os.path.join(image_save_dir, cam) for cam in self.cfg.cameras]
         for cam_dir in cam_dirs:
             os.makedirs(cam_dir, exist_ok=True)
@@ -383,43 +389,66 @@ class Pipeline(object):
             world_pose = opengl2world.dot(gl_pose)
             return world_pose.tolist()
 
-        lc_to_imu = self.calibrator.calib_params_dict['stereo']['Tr_cam_to_imu']
+        lc_to_imu = self.calibrator.calib_params_dict["stereo"]["Tr_cam_to_imu"]
+        rc_to_imu = lc_to_imu @ np.linalg.inv(cam_t_pose)
+
+        first_c2w = None
+
         frames = []
         for idx, msg_dict in enumerate(tqdm.tqdm(bag_handler.msg_generator(to_image=True))):
-            left_image_timestamp = msg_dict['front_left'].timestamp.to_sec()
+            left_image_timestamp = msg_dict["front_left"].timestamp.to_sec()
             if left_image_timestamp not in pose_dict:
+                print(f"pass frame {idx}......")
                 continue
-            left = msg_dict['front_left'].message
-            left_unwarp = self.calibrator.unwarp(left, 'stereo', 0)
-            right = msg_dict['front_right'].message
-            right_unwarp = self.calibrator.unwarp(right, 'stereo', 1)
+                
+            # image 
+            left = msg_dict["front_left"].message
+            left_unwarp = self.calibrator.unwarp(left, "stereo", 0)
+            right = msg_dict["front_right"].message
+            right_unwarp = self.calibrator.unwarp(right, "stereo", 1)
 
-            lc_to_w = pose_dict[left_image_timestamp]
-            rc_to_w = lc_to_w.dot(np.linalg.inv(cam_t_pose))
+            # pose 
+            #       1. odom pose
+            imu_to_w, pose = np.matrix(msg_dict["imu_to_world"]), msg_dict["pose"]
+            lc_to_w = imu_to_w @ lc_to_imu
+            rc_to_w = lc_to_w @ np.linalg.inv(cam_t_pose)
 
-            imu_to_w = lc_to_w @ np.linalg.inv(lc_to_imu)
-            lc_to_imu = np.linalg.inv(imu_to_w) @ lc_to_w 
-            rc_to_imu = np.linalg.inv(imu_to_w) @ rc_to_w 
+            if first_c2w is None:
+                if localization_topic in msg_dict.keys():
+                    pb = localization_pb2.LocalizationEstimation()
+                    pb.ParseFromString(msg_dict[localization_topic][0].message.data)
+                    pos, quat = pb.position, pb.orientation
+                    ret = quat_xyz_to_matrix(quat.qx, quat.qy, quat.qz, quat.qw, pos.x, pos.y, pos.z)
+                    first_c2w = ret @ lc_to_imu
+                
+            #       2. vio pose
+            lc_to_w_vio = pose_dict[left_image_timestamp]   # 相对first_frame的pose
+            rc_to_w_vio = lc_to_w_vio @ np.linalg.inv(cam_t_pose)
+            imu_to_w_vio = lc_to_w_vio @ np.linalg.inv(lc_to_imu)
 
             frames.append({
                 "file_path": "images/front_left/{:06d}.png".format(idx),
-                "transform_matrix": cam_pose_to_nerf(lc_to_w),
+                "transform_matrix": lc_to_w.tolist(),   # cam_pose_to_nerf
+                "transform_matrix_vio": lc_to_w_vio.tolist(),
                 "imu2w": imu_to_w.tolist(),
+                "imu2w_vio": imu_to_w_vio.tolist(), 
                 "c2imu": lc_to_imu.tolist(),
-                "cam_name": 'front_left',
+                "cam_name": "front_left",
                 "intr": p1.tolist(),
-                "timestamp": left_image_timestamp
+                "timestamp": left_image_timestamp,
             })
             cv2.imwrite(os.path.join(image_save_dir, "front_left", "{:06d}.png".format(idx)), left_unwarp)
 
             frames.append({
                 "file_path": "images/front_right/_{:06d}.png".format(idx),
-                "transform_matrix": cam_pose_to_nerf(rc_to_w),
+                "transform_matrix": rc_to_w.tolist(),
+                "transform_matrix_vio": rc_to_w_vio.tolist(),
                 "imu2w": imu_to_w.tolist(),
+                "imu2w_vio": imu_to_w_vio.tolist(),
                 "c2imu": rc_to_imu.tolist(),
-                "cam_name": 'front_right',
+                "cam_name": "front_right",
                 "intr": p2.tolist(),
-                "timestamp": left_image_timestamp
+                "timestamp": left_image_timestamp,
             })       
             cv2.imwrite(os.path.join(image_save_dir, "front_right", "{:06d}.png".format(idx)), right_unwarp)   
 
@@ -440,10 +469,11 @@ class Pipeline(object):
             "k4": 0, # fourth radial distorial parameter, used by [OPENCV_FISHEYE]
             "p1": 0, # first tangential distortion parameter, used by [OPENCV]
             "p2": 0, # second tangential distortion parameter, used by [OPENCV]
+            "base_pose": first_c2w.tolist()
         }
-        transforms_data['frames'] = frames
-        transfrom_json_fpath = self.path_manager.join_root('transforms.json')
-        with open(transfrom_json_fpath, 'w') as f:
+        transforms_data["frames"] = frames
+        transfrom_json_fpath = self.path_manager.join_root("transforms.json")
+        with open(transfrom_json_fpath, "w") as f:
             json.dump(transforms_data, f, indent=2)
             print(f"=> transforms.json saved to {transfrom_json_fpath}")
 
@@ -453,49 +483,50 @@ class Pipeline(object):
         scene_objects = dict()
         scene_observers = dict()  
         n_frames = len(frames)//len(self.cfg.cameras)
-        if 'ego_car' not in scene_observers:
-            scene_observers['ego_car'] = dict(
-                class_name='EgoVehicle', n_frames=n_frames, 
+        if "ego_car" not in scene_observers:
+            scene_observers["ego_car"] = dict(
+                class_name="EgoVehicle", n_frames=n_frames, 
                 data=dict(v2w=[], timestamp=[], global_frame_ind=[]))
         for j in range(n_frames):
             frame = frames[::len(self.cfg.cameras)][j]
-            scene_observers['ego_car']['data']['v2w'].append(frame['imu2w'])
-            scene_observers['ego_car']['data']['timestamp'].append(frame['timestamp'])
-            scene_observers['ego_car']['data']['global_frame_ind'].append(j)
+            scene_observers["ego_car"]["data"]["v2w"].append(frame["imu2w"])
+            scene_observers["ego_car"]["data"]["timestamp"].append(frame["timestamp"])
+            scene_observers["ego_car"]["data"]["global_frame_ind"].append(j)
 
         for i, cam_i in enumerate(self.cfg.cameras):
             if cam_i not in scene_observers:
                 scene_observers[cam_i] = dict(
-                    class_name='Camera', n_frames=n_frames, 
+                    class_name="Camera", n_frames=n_frames, 
                     data=dict(hw=[], intr=[], distortion=[], c2v_0=[], c2v=[], sensor_v2w=[], c2w=[], timestamp=[], global_frame_ind=[]))
             for j in range(n_frames):
                 frame = frames[j + i*len(self.cfg.cameras)]
-                scene_observers[cam_i]['data']['hw'].append((h, w))
-                scene_observers[cam_i]['data']['intr'].append(frame['intr'])
-                scene_observers[cam_i]['data']['c2w'].append(frame['transform_matrix'] @ opencv2opengl) # streetsurf : opencv
-                scene_observers[cam_i]['data']['c2v'].append(frame['c2imu'])
-                scene_observers[cam_i]['data']['sensor_v2w'].append(frame['imu2w'])
-                scene_observers[cam_i]['data']['timestamp'].append(frame['timestamp'])
-                scene_observers[cam_i]['data']['global_frame_ind'].append(j)     
+                scene_observers[cam_i]["data"]["hw"].append((h, w))
+                scene_observers[cam_i]["data"]["intr"].append(frame["intr"])
+                scene_observers[cam_i]["data"]["c2w"].append(frame["transform_matrix"]) # ????
+                # scene_observers[cam_i]["data"]["c2w"].append(frame["transform_matrix"] @ opencv2opengl) # streetsurf : opencv
+                scene_observers[cam_i]["data"]["c2v"].append(frame["c2imu"])
+                scene_observers[cam_i]["data"]["sensor_v2w"].append(frame["imu2w"])
+                scene_observers[cam_i]["data"]["timestamp"].append(frame["timestamp"])
+                scene_observers[cam_i]["data"]["global_frame_ind"].append(j)     
         
         for oid, odict in scene_observers.items():
-            for k, v in odict['data'].items():
-                odict['data'][k] = np.array(v)  
+            for k, v in odict["data"].items():
+                odict["data"][k] = np.array(v)  
         for oid, odict in scene_objects.items():
-            obj_annos = odict.pop('frame_annotations')   
+            obj_annos = odict.pop("frame_annotations")   
 
         world_offset = np.zeros([3,])
         scene_metas = dict(world_offset=world_offset)
-        scene_metas['n_frames'] = n_frames
-        scene_metas['up_vec'] = '+z'
+        scene_metas["n_frames"] = n_frames
+        scene_metas["up_vec"] = "+z"
 
         scenario = dict()
-        scenario['scene_id'] = os.path.basename(self.path_manager.bag_name).replace('.db','')
-        scenario['metas'] = scene_metas
-        scenario['objects'] = scene_objects
-        scenario['observers'] = scene_observers
-        scenario_fpath = self.path_manager.join_root('scenario.pt')
-        with open(scenario_fpath, 'wb') as f:
+        scenario["scene_id"] = os.path.basename(self.path_manager.bag_name).replace(".db","")
+        scenario["metas"] = scene_metas
+        scenario["objects"] = scene_objects
+        scenario["observers"] = scene_observers
+        scenario_fpath = self.path_manager.join_root("scenario.pt")
+        with open(scenario_fpath, "wb") as f:
             pickle.dump(scenario, f)
             print(f"=> scenario.pt saved to {scenario_fpath}")
 
@@ -512,10 +543,12 @@ class Pipeline(object):
         if not os.path.exists(self.path_manager.pose_path):
             self.track()
             self.pose_estimate()
+        else:
+            print(f"Tracked previously, using {self.path_manager.pose_path}!")
+
+        if not os.path.exists(self.path_manager.join_root("global.pcd")):
             if self.cfg.global_cloud:
                 self.extract_global_cloud()
-        else:
-            print(f'Tracked previously, using {self.path_manager.pose_path}!')
 
         if self.cfg.nerf:
             self.generate_nerf_data()
@@ -523,7 +556,17 @@ class Pipeline(object):
         if self.cfg.clear_cache:
             self.clear_cache()
 
-if __name__ == '__main__':
+def quat_xyz_to_matrix(qx, qy, qz, qw, x, y, z):
+    ret = np.array([
+            [1 - 2*qy**2 - 2*qz**2, 2*qx*qy - 2*qw*qz, 2*qx*qz + 2*qw*qy, x],
+            [2*qx*qy + 2*qw*qz, 1 - 2*qx**2 - 2*qz**2, 2*qy*qz - 2*qw*qx, y],
+            [2*qx*qz - 2*qw*qy, 2*qy*qz + 2*qw*qx, 1 - 2*qx**2 - 2*qy**2, z],
+            [0, 0, 0, 1]
+        ])
+    return ret
+
+
+if __name__ == "__main__":
     cfg = PipelineCfg()
     parser = cfg.generate_aug()
     args = parser.parse_args()
@@ -531,5 +574,5 @@ if __name__ == '__main__':
     cfg.merge(args)
 
     pipeline = Pipeline(cfg)
-    # pipeline.non_skip_pipeline = ['pose_estimate']
+    # pipeline.non_skip_pipeline = ["pose_estimate"]
     pipeline.run()

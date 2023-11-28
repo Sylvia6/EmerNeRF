@@ -125,45 +125,27 @@ class PlusPixelSource(ScenePixelSource):
         # to store per-camera intrinsics and extrinsics
 
         # compute per-image poses and intrinsics
-        if self.pose_type == "imu":
-            # imu ego pose
-            ego_poses_path = os.path.join(self.data_path, "ego_pos_with_vel")
-            poses_imu_w_tracking = []
-            for frame in range(len(os.listdir(ego_poses_path))):
-                info = load_pickle(os.path.join(ego_poses_path, ("%06d"%frame)+".pkl"))
-                poses_imu_w_tracking.append(info["ego_pose"]) 
-            poses_imu_w_tracking = np.array(poses_imu_w_tracking).astype(np.float64)
-            pose0 = poses_imu_w_tracking[0].copy()
-            poses_imu_w_tracking = np.linalg.inv(pose0) @ poses_imu_w_tracking
-            
-            # calib
-            calibration_file = os.path.join(self.data_path, "calib", ("%06d"%0)+".pkl")
-            calib = load_pickle(calibration_file)
-            """ 
-            calib参数介绍
-                M: 原始内参矩阵; D: 畸变参数; P: 去完畸变的新内参矩阵; R:image平面->rectify平面的旋转矩阵 ; Tr_cam_to_imu: camera->imu的外参矩阵;
-            """
-            cam_ids, intrs, c2ws = [], [], []
-            for t in range(self.start_timestep, self.end_timestep):
-                for cam_i in self.camera_list:
-                    cam_ids.append(total_camera_dict[cam_i])
-                    intrs.append(calib["P2"] if cam_i=="front_right" else calib["P1"])
-                    
-                    cam_i_imu = calib[f"Tr_cam_to_imu_{cam_i}"]
-                    c2ws.append(poses_imu_w_tracking[t] @ cam_i_imu)
-            cam_ids, intrs, c2ws = np.array(cam_ids), np.array(intrs), np.array(c2ws), 
+        import json
+        # opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
+        data_file = os.path.join(self.data_path, "transforms.json")
+        assert os.path.exists(data_file)
+        with open(data_file) as f:
+            data = json.load(f)
+        frames = data["frames"]
+        cam_ids = np.array([total_camera_dict[frame["cam_name"]] for frame in frames])
+        intrs = np.array([frame["intr"] for frame in frames])
+        
+        # base pose in eqdc world
+        self.base_pose = np.array(data["base_pose"])
 
-        elif self.pose_type == "vio":
-            import json
-            opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
-            data_file = os.path.join(self.data_path, "transforms.json")
-            assert os.path.exists(data_file)
-            with open(data_file) as f:
-                data = json.load(f)
-            frames = data["frames"]
-            cam_ids = np.array([total_camera_dict[frame["cam_name"]] for frame in frames])
-            intrs = np.array([frame["intr"] for frame in frames])
-            c2ws = np.array([frame["transform_matrix"] @ opencv2opengl for frame in frames]) # opengl to opencv
+        if self.pose_type == 'odom':
+            c2ws = np.array([frame["transform_matrix"] for frame in frames]) # opengl to opencv ? c2ws @ opencv2opengl 
+            c2w_0 = c2ws[0].copy()
+            c2ws = np.linalg.inv(c2w_0) @ c2ws
+        elif self.pose_type == 'vio':
+            c2ws = np.array([frame["transform_matrix_vio"] for frame in frames])
+        else:
+            raise ValueError("The pose_type is a ValueError str.")
 
         indices = self.selected_steps * self.num_cams
         for i in range(self.num_cams):
@@ -344,6 +326,7 @@ class PlusDataset(SceneDataset):
                 self.start_timestep,
                 self.end_timestep,
                 device=self.device,
+                pose_type=self.data_cfg.pose_type,
                 scene_id=self.scene_idx,
             )
             pixel_source.to(self.device)
@@ -576,8 +559,8 @@ class ScenarioDataset(SceneDataset):
         assert self.data_cfg.dataset == "plus"
 
         self.scenes = {}
-
-        aabb_min, aabb_max = -1*torch.ones(3), torch.ones(3)
+        
+        self.base_scene_id = None
         if "scenarios" in data_cfg:
             for scenario_cfg_str in data_cfg.scenarios:
                 _scene_id, start, stop = [it.strip(" ") for it in scenario_cfg_str.split(",")]
@@ -586,11 +569,26 @@ class ScenarioDataset(SceneDataset):
                 cfg.start_timestep, cfg.end_timestep = int(start), int(stop)
                 dataset = PlusDataset(data_cfg=cfg)
                 self.scenes[_scene_id] = dataset
-                # cal scenario_aabb
-                aabb_min[aabb_min > dataset.aabb[:3]] =  dataset.aabb[:3][aabb_min > dataset.aabb[:3]]
-                aabb_max[aabb_max < dataset.aabb[3:]] =  dataset.aabb[3:][aabb_max < dataset.aabb[3:]]
-        self.aabb = torch.concatenate([aabb_min, aabb_max])
+                if not self.base_scene_id:
+                    self.base_scene_id = _scene_id
 
+        self.base_pose = np.array(self.scenes[self.base_scene_id].pixel_source.base_pose)
+
+        aabb_min, aabb_max = -1*torch.ones(3), torch.ones(3)
+        trans_poses = []
+        for scene_id, dataset in self.scenes.items():
+            # rebase_coord to first dataset
+            trans_pose = np.linalg.inv(self.base_pose) @ dataset.pixel_source.base_pose
+            trans_poses.append(trans_pose)
+            # dataset.pixel_source.cam_to_worlds from vio-pose, means: cam_n to cam_0
+            dataset.pixel_source.cam_to_worlds = (torch.from_numpy(trans_pose) @ dataset.pixel_source.cam_to_worlds.double()).float()
+            dataset.aabb = dataset.get_aabb()
+            
+            # cal scenario_aabb
+            aabb_min[aabb_min > dataset.aabb[:3]] =  dataset.aabb[:3][aabb_min > dataset.aabb[:3]]
+            aabb_max[aabb_max < dataset.aabb[3:]] =  dataset.aabb[3:][aabb_max < dataset.aabb[3:]]
+        self.aabb = torch.concatenate([aabb_min, aabb_max])
+        np.save("./scenario_trans_poses.npy", trans_poses)   # concat global.pcd to check trans_pose
         # ---- create split wrappers ---- #
         self.build_split_wrapper()
 

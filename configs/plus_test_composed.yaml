@@ -1,22 +1,18 @@
 data:
-  # pose_type: 'vio'
+  pose_type: vio
   data_root: /mnt/intel/jupyterhub/lu.li/plus_data/area
   dataset: plus
   preload_device: cpu  
   ray_batch_size: 8192 # ray batch size for training, it's embedded in the dataset class for now
   scenarios:
     # scene_name, start_frame, end_frame(-1 -> len(scene))
-    # - 20231101T102809_pdb-l4e-b0006_1_482to491, 0, -1 
-    # - 20231104T131052_pdb-l4e-b0001_1_172to181, 0, -1
-    # - 20231103T103225_pdb-l4e-b0001_4_864to874, 0, -1
+    - 20231102T120243_pdb-l4e-b0001_7_2to9, 0, -1 
+    - 20231102T141429_pdb-l4e-b0001_0_991to1000, 0, -1
+    - 20231104T131052_pdb-l4e-b0001_1_172to181, 0, -1
 
-    # test same bag, validate composed_model
-    # - 20231101T102809_pdb-l4e-b0006_1_482to491, 0, -1 
+    # test pose
     # - 20231101T102809_pdb-l4e-b0006_1_482to491_, 0, -1
-
-    - 20231103T103225_pdb-l4e-b0001_4_864to874, 0, -1
-    - 20231103T103225_pdb-l4e-b0001_4_864to874_, 0, -1
-    # - 20231102T120243_pdb-l4e-b0001_7_2to9, 0, -1
+    # - 20231101T102809_pdb-l4e-b0006_1_482to491, 0, -1 # right
 
   # scene_idx: 20230319T090808_pdb-l4e-b0007_6_871to931
   pixel_source:
@@ -67,9 +63,26 @@ supervision: # supervision hyperparameters
   #   loss_coef: 0.5 # didn't do any ablation study on this
   dynamic: # dynamic regularization
     loss_type: sparsity 
-    loss_coef: 0.001
-    # 0.01
+    loss_coef: 0.001  # 0.01
+
     # entropy_loss_skewness: 1.1 # TODO: we didn't study this yet
   # shadow: # shadow regularization
   #   loss_type: sparsity
   #   loss_coef: 0.01
+
+# # use to debug whole training
+# optim: # optimization hyperparameters
+#   num_iters: 100 # number of iterations to train
+#   weight_decay: 1e-5
+#   lr: 0.01
+#   seed: 0 # random seed
+#   check_nan: False # whether to check nan, will slow down training
+#   cache_rgb_freq: 10 # how often to cache the error map
+logging:
+  vis_freq: 1000 # how often to visualize training stats
+#   print_freq: 10 # how often to print training stats
+#   saveckpt_freq: 50 # how often to save checkpoints
+#   save_seperate_video: True # whether to save seperate video for each rendered key
+# eval:
+#   eval_lidar_flow: False # whether to evaluate lidar flow, only available for waymo for now
+#   remove_ground_when_eval_lidar_flow: True # whether to remove ground points when evaluating lidar flow
