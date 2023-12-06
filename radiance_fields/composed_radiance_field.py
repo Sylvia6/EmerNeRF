@@ -438,7 +438,8 @@ class ComposedRadianceField(nn.Module):
         has_timestamps = (
             "normed_timestamps" in data_dict or "lidar_normed_timestamps" in data_dict
         )
-        scene_id = data_dict["scene_id"]
+        if "scene_id" in data_dict:
+            scene_id = data_dict["scene_id"]
         if len(self.dynamic_xyz_encoder) > 0 and has_timestamps:
             # forward dynamic branch
             if "normed_timestamps" in data_dict:

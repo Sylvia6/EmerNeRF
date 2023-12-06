@@ -136,6 +136,9 @@ def render(
     # sky
     opacities, sky_masks = [], []
 
+    # dynamic mask
+    dynamic_masks = []
+
     # features
     pred_dinos, gt_dinos = [], []
     pred_dinos_pe_free, pred_dino_pe = [], []
@@ -215,6 +218,9 @@ def render(
             # -------- sky -------- #
             if "sky_masks" in data_dict:
                 sky_masks.append(get_numpy(data_dict["sky_masks"]))
+            # -------- dynamic mask -------- #
+            if "dynamic_masks" in data_dict:
+                dynamic_masks.append(get_numpy(data_dict["dynamic_masks"]))
 
             if compute_metrics:
                 psnrs.append(compute_psnr(rgb, data_dict["pixels"]))
@@ -454,6 +460,8 @@ def render(
         results_dict["gt_rgbs"] = gt_rgbs
     if len(sky_masks) > 0:
         results_dict["gt_sky_masks"] = sky_masks
+    if len(dynamic_masks) > 0:
+        results_dict["gt_dynamic_masks"] = dynamic_masks
     if len(pred_dinos) > 0:
         results_dict["dino_feats"] = pred_dinos
     if len(gt_dinos) > 0:
@@ -544,9 +552,9 @@ def save_concatenated_videos(
                 if key not in render_results or len(render_results[key]) == 0:
                     continue
                 frames = render_results[key][i * num_cams : (i + 1) * num_cams]
-            if key == "gt_sky_masks":
+            if key in ["gt_sky_masks", "gt_dynamic_masks"]:
                 frames = [np.stack([frame, frame, frame], axis=-1) for frame in frames]
-            elif key == "sky_masks":
+            elif key in ["sky_masks"]:
                 frames = [
                     1 - np.stack([frame, frame, frame], axis=-1) for frame in frames
                 ]
