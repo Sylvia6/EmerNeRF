@@ -1,14 +1,10 @@
 data:
-  pose_type: odom #vio #vio
+  pose_type: vio
   data_root: /data/plus_data
   dataset: plus
   preload_device: cpu  
   ray_batch_size: 6000 #4096 # ray batch size for training, it's embedded in the dataset class for now
-  scenarios:
-    # scene_name, start_frame, end_frame(-1 -> len(scene))
-    - 20231102T120243_pdb-l4e-b0001_7_2to9, 0, -1 
-    - 20231102T141429_pdb-l4e-b0001_0_991to1000, 0, -1
-    - 20231104T131052_pdb-l4e-b0001_1_172to181, 0, -1
+  scene_idx: 20231102T120243_pdb-l4e-b0001_7_2to9
   pixel_source:
     load_size: [540, 960]
     num_cams: 2
@@ -57,7 +53,7 @@ supervision: # supervision hyperparameters
   #   loss_coef: 0.5 # didn't do any ablation study on this
   dynamic: # dynamic regularization
     loss_type: sparsity 
-    loss_coef: 0.005  # src: 0.01
+    loss_coef: 0.005  # 0.01
     # entropy_loss_skewness: 1.1 # TODO: we didn't study this yet
   # shadow: # shadow regularization
   #   loss_type: sparsity
