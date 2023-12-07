@@ -6,6 +6,7 @@ import time
 from typing import List, Optional
 
 import imageio
+import random
 import numpy as np
 import torch
 import torch.utils.data
@@ -524,6 +525,15 @@ def render_novel(
 def main(args):
     cfg = setup(args)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def setup_seed(seed):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+    setup_seed(2023)
+
     # ------ build dataset -------- #
     # we need to set some hyper-parameters for the model based on the dataset,
     # e.g., aabb, number of training timestamps, number of cameras, etc, so
@@ -592,26 +602,26 @@ def main(args):
 
     if args.visualize_voxel:
         # or args.eval_only:
-        if cfg.nerf.model.head.enable_flow_branch:
-            logger.info("Visualizing scene flow...")
-            visualize_scene_flow(
-                cfg=cfg,
-                model=model,
-                dataset=dataset,
-                device=device,
-            )
-        if cfg.nerf.model.head.enable_feature_head:
-            logger.info("Visualizing voxel features...")
-            visualize_voxels(
-                cfg,
-                model,
-                proposal_estimator,
-                proposal_networks,
-                dataset,
-                device=device,
-                save_html=True,
-                is_dynamic=cfg.nerf.model.head.enable_dynamic_branch,
-            )
+        # if cfg.nerf.model.head.enable_flow_branch:
+        #     logger.info("Visualizing scene flow...")
+        #     visualize_scene_flow(
+        #         cfg=cfg,
+        #         model=model,
+        #         dataset=dataset,
+        #         device=device,
+        #     )
+        # if cfg.nerf.model.head.enable_feature_head:
+        logger.info("Visualizing voxel features...")
+        visualize_voxels(
+            cfg,
+            model,
+            proposal_estimator,
+            proposal_networks,
+            dataset,
+            device=device,
+            save_html=True,
+            is_dynamic=cfg.nerf.model.head.enable_dynamic_branch,
+        )
         logger.info("Visualization done!")
         exit()  
 
@@ -798,12 +808,21 @@ def main(args):
                     )
                 )
             if dynamic_reg_loss_fn is not None:
-                pixel_loss_dict.update(
-                    dynamic_reg_loss_fn(
-                        dynamic_density=render_results["extras"]["dynamic_density"],
-                        static_density=render_results["extras"]["static_density"],
+                if cfg.data.pixel_source.load_dynamic_mask:
+                    pixel_loss_dict.update(
+                        dynamic_reg_loss_fn(
+                            dynamic_density=render_results["extras"]["dynamic_density"],
+                            static_density=render_results["extras"]["static_density"],
+                            mask=1-pixel_data_dict["dynamic_masks"] # 约束非动态物体的区域
+                        )
                     )
-                )
+                else:
+                    pixel_loss_dict.update(
+                        dynamic_reg_loss_fn(
+                            dynamic_density=render_results["extras"]["dynamic_density"],
+                            static_density=render_results["extras"]["static_density"],
+                        )
+                    )
             if shadow_loss_fn is not None:
                 pixel_loss_dict.update(
                     shadow_loss_fn(
@@ -1100,13 +1119,16 @@ def main(args):
                             ],
                         }
                     )
+                save_keys = render_keys.copy()
+                if cfg.data.pixel_source.load_dynamic_mask:
+                    save_keys.append("gt_dynamic_masks")
                 vis_frame_dict = save_videos(
                     render_results,
                     save_pth=os.path.join(
                         cfg.log_dir, "images", f"step_{step}.png"
                     ),  # don't save the video
                     num_timestamps=1,
-                    keys=render_keys,
+                    keys=save_keys, #render_keys,
                     save_seperate_video=cfg.logging.save_seperate_video,
                     num_cams=dataset.num_cams,
                     fps=cfg.render.fps,

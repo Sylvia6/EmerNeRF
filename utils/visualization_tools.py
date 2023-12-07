@@ -463,6 +463,8 @@ def visualize_voxels(
     save_html: bool = True,
     is_dynamic: bool = False,
 ):
+    out_dir = os.path.join(cfg.log_dir, "voxel_out")
+    os.makedirs(out_dir, exist_ok=True)
     model.eval()
     for p in proposal_networks:
         p.eval()
@@ -497,18 +499,42 @@ def visualize_voxels(
     # collect some patches for PCA
     to_compute_pca_patches = []
 
+
+    """
+        1. query depth, lidar_mode
+    """
+
     pbar = tqdm(
         dataset.full_pixel_set,
         desc="querying depth",
         dynamic_ncols=True,
         total=len(dataset.full_pixel_set),
     )
-    for i, data_dict in enumerate(pbar):
+    static_path, dynamic_path = f"{out_dir}/static_depths.npy", f"{out_dir}/dynamic_depths.npy"
+    use_stored_depth = enable_feature or (os.path.exists(static_path) and os.path.exists(dynamic_path))
+    print(f"Using stored depth: {use_stored_depth}...")
+    if use_stored_depth:
+        static_depths = torch.from_numpy(np.load(static_path)).to(device)
+        dynamic_depths = torch.from_numpy(np.load(dynamic_path)).to(device)
+        assert static_depths.shape == dynamic_depths.shape
+    else:
+        static_depths, dynamic_depths = [], []  # save results, to reduce time consumption
+
+    for i, data_dict in enumerate(pbar):        
         data_dict = dataset.full_pixel_set[i]
+        if hasattr(dataset, 'scenes'):
+            scene_id = dataset.full_pixel_set.get_scene_id(i)
+            data_dict['scene_id'] = scene_id
         for k, v in data_dict.items():
-            data_dict[k] = v.to(device)
-        if i < dataset.num_cams:
-            # collect all patches from the first timestep
+            if isinstance(v, torch.Tensor):
+                if k not in ['scene_id']:
+                    data_dict[k] = v.to(device)
+        # query the depth. we force a lidar mode here so that the renderer will skip
+        # querying other features such as colors, features, etc.
+        data_dict["lidar_origins"] = data_dict["origins"].to(device)
+        data_dict["lidar_viewdirs"] = data_dict["viewdirs"].to(device)
+        data_dict["lidar_normed_timestamps"] = data_dict["normed_timestamps"].to(device)
+        if not use_stored_depth:
             with torch.no_grad():
                 render_results = render_rays(
                     radiance_field=model,
@@ -517,35 +543,20 @@ def visualize_voxels(
                     data_dict=data_dict,
                     cfg=cfg,
                     proposal_requires_grad=False,
+                    prefix="lidar_",  # force lidar mode
+                    return_decomposition=True,
                 )
-            if enable_feature:
-                if "dino_pe_free" in render_results:
-                    dino_feats = render_results["dino_pe_free"]
-                else:
-                    dino_feats = render_results["dino_feat"]
-                dino_feats = dino_feats.reshape(-1, dino_feats.shape[-1])
-                to_compute_pca_patches.append(dino_feats)
-        # query the depth. we force a lidar mode here so that the renderer will skip
-        # querying other features such as colors, features, etc.
-        data_dict["lidar_origins"] = data_dict["origins"].to(device)
-        data_dict["lidar_viewdirs"] = data_dict["viewdirs"].to(device)
-        data_dict["lidar_normed_timestamps"] = data_dict["normed_timestamps"].to(device)
-        with torch.no_grad():
-            render_results = render_rays(
-                radiance_field=model,
-                proposal_estimator=proposal_estimator,
-                proposal_networks=proposal_networks,
-                data_dict=data_dict,
-                cfg=cfg,
-                proposal_requires_grad=False,
-                prefix="lidar_",  # force lidar mode
-                return_decomposition=True,
-            )
-        # ==== get the static voxels ======
-        if is_dynamic:
-            static_depth = render_results["static_depth"]
+            if is_dynamic:
+                static_depth = render_results["static_depth"]
+                dynamic_depth = render_results["dynamic_depth"]
+                dynamic_depths.append(dynamic_depth)
+            else:
+                static_depth = render_results["depth"]
+            static_depths.append(static_depth)        
         else:
-            static_depth = render_results["depth"]
+            static_depth = static_depths[i]
+            dynamic_depth = dynamic_depths[i]
+        # ==== get the static voxels ======
         world_coords = (
             data_dict["lidar_origins"] + data_dict["lidar_viewdirs"] * static_depth
         )
@@ -571,7 +582,6 @@ def visualize_voxels(
 
         # ==== get the dynamic voxels ======
         if is_dynamic:
-            dynamic_depth = render_results["dynamic_depth"]
             world_coords = (
                 data_dict["lidar_origins"] + data_dict["lidar_viewdirs"] * dynamic_depth
             )
@@ -593,7 +603,7 @@ def visualize_voxels(
             voxel_coords_z = voxel_coords[..., 2][selector]
             # index into empty_voxels using the separated coordinates
             empty_dynamic_voxels[voxel_coords_x, voxel_coords_y, voxel_coords_z] = 1
-            if i % dataset.num_cams == 0 and i > 0:
+            if i % dataset.num_cams == 0:   # 左目，同样的timestamp结果是一样的
                 all_occupied_dynamic_points.append(
                     voxel_coords_to_world_coords(
                         aabb_min,
@@ -610,10 +620,21 @@ def visualize_voxels(
         dummy_pca_reduction, color_min, color_max = get_robust_pca(
             torch.cat(to_compute_pca_patches, dim=0).to(device), m=2.5
         )
-    # now let's query the features
+    if not use_stored_depth:
+        static_depths = torch.stack(static_depths).cpu().numpy()
+        dynamic_depths = torch.stack(dynamic_depths).cpu().numpy()
+        if len(static_depths) == len(dynamic_depths):
+            np.save(static_path, static_depths)
+            np.save(dynamic_path, dynamic_depths)
+    
+    """
+        2. query density and feature
+    """
+    # now let's query the densitys and features
     all_occupied_static_points = voxel_coords_to_world_coords(
         aabb_min, aabb_max, static_voxel_resolution, torch.nonzero(empty_static_voxels)
     )
+    import pdb;pdb.set_trace()
     chunk = 2**18
     pca_colors = []
     occupied_points = []
@@ -663,50 +684,106 @@ def visualize_voxels(
     if is_dynamic:
         dynamic_pca_colors = []
         dynamic_occupied_points = []
-        unq_timestamps = dataset.pixel_source.unique_normalized_timestamps.to(device)
-        # query every 10 frames
-        pbar = tqdm(
-            range(0, len(all_occupied_dynamic_points), 10),
-            desc="querying dynamic fields",
-            dynamic_ncols=True,
-        )
-        for i in pbar:
-            occupied_points_chunk = all_occupied_dynamic_points[i]
-            normed_timestamps = unq_timestamps[i].repeat(
-                occupied_points_chunk.shape[0], 1
+        if hasattr(dataset, "scenes"):
+            dynamic_coords, dynamic_colors = [], []
+            unq_timestamps, scene_ids = [], []
+            for scene_id, dset in dataset.scenes.items():
+                unq_timestamps.extend(dset.pixel_source.unique_normalized_timestamps.to(device))
+                scene_ids.extend([scene_id]*len(dset.pixel_source.unique_normalized_timestamps))
+            assert len(unq_timestamps) == len(all_occupied_dynamic_points)
+            # query every 10 frames
+            pbar = tqdm(
+                range(0, len(all_occupied_dynamic_points), 10),
+                desc="querying dynamic fields",
+                dynamic_ncols=True,
             )
-            with torch.no_grad():
-                results = model.forward(
-                    occupied_points_chunk,
-                    data_dict={"normed_timestamps": normed_timestamps},
-                    query_feature_head=False,
+            for i in pbar:
+                occupied_points_chunk = all_occupied_dynamic_points[i]
+                if occupied_points_chunk.shape[0] == 0:
+                    continue
+                normed_timestamps = unq_timestamps[i].repeat(
+                    occupied_points_chunk.shape[0], 1
                 )
-            selector = results["dynamic_density"].squeeze() > 0.1
-            occupied_points_chunk = occupied_points_chunk[selector]
-            if len(occupied_points_chunk) == 0:
-                continue
-            # query some features
-            normed_timestamps = unq_timestamps[i].repeat(
-                occupied_points_chunk.shape[0], 1
-            )
-            if enable_feature:
                 with torch.no_grad():
-                    feats = model.forward(
+                    results = model.forward(
+                        occupied_points_chunk,
+                        data_dict={"normed_timestamps": normed_timestamps, "scene_id": scene_ids[i]},
+                        query_feature_head=False,
+                    )
+                selector = results["dynamic_density"].squeeze() > 0.1
+                occupied_points_chunk = occupied_points_chunk[selector]
+                if len(occupied_points_chunk) == 0:
+                    continue
+                # query some features
+                normed_timestamps = unq_timestamps[i].repeat(
+                    occupied_points_chunk.shape[0], 1
+                )
+                if enable_feature:
+                    with torch.no_grad():
+                        feats = model.forward(
+                            occupied_points_chunk,
+                            data_dict={"normed_timestamps": normed_timestamps, "scene_id": scene_ids[i]},
+                            query_feature_head=True,
+                            query_pe_head=False,
+                        )["dynamic_dino_feat"]
+                    colors = feats @ dummy_pca_reduction
+                    del feats
+                    colors = (colors - color_min) / (color_max - color_min)
+                else:
+                    colors = torch.zeros_like(occupied_points_chunk)
+                    colors[:, 1] = 1    # green
+                dynamic_pca_colors.append(torch.clamp(colors, 0, 1))
+                dynamic_occupied_points.append(occupied_points_chunk)
+            dynamic_coords.extend([x.cpu().numpy() for x in dynamic_occupied_points])
+            dynamic_colors.extend([x.cpu().numpy() for x in dynamic_pca_colors])
+        else:
+            unq_timestamps = dataset.pixel_source.unique_normalized_timestamps.to(device)
+            # query every 10 frames
+            pbar = tqdm(
+                range(0, len(all_occupied_dynamic_points), 10),
+                desc="querying dynamic fields",
+                dynamic_ncols=True,
+            )
+            assert len(unq_timestamps) == len(all_occupied_dynamic_points)
+            for i in pbar:
+                occupied_points_chunk = all_occupied_dynamic_points[i]
+                if occupied_points_chunk.shape[0] == 0:
+                    continue
+                normed_timestamps = unq_timestamps[i].repeat(
+                    occupied_points_chunk.shape[0], 1
+                )
+                with torch.no_grad():
+                    results = model.forward(
                         occupied_points_chunk,
                         data_dict={"normed_timestamps": normed_timestamps},
-                        query_feature_head=True,
-                        query_pe_head=False,
-                    )["dynamic_dino_feat"]
-                colors = feats @ dummy_pca_reduction
-                del feats
-                colors = (colors - color_min) / (color_max - color_min)
-            else:
-                colors = np.zeros_like(occupied_points_chunk)
-                colors[:, 1] = 1    # green
-            dynamic_pca_colors.append(torch.clamp(colors, 0, 1))
-            dynamic_occupied_points.append(occupied_points_chunk)
-        dynamic_coords = [x.cpu().numpy() for x in dynamic_occupied_points]
-        dynamic_colors = [x.cpu().numpy() for x in dynamic_pca_colors]
+                        query_feature_head=False,
+                    )
+                selector = results["dynamic_density"].squeeze() > 0.1
+                occupied_points_chunk = occupied_points_chunk[selector]
+                if len(occupied_points_chunk) == 0:
+                    continue
+                # query some features
+                normed_timestamps = unq_timestamps[i].repeat(
+                    occupied_points_chunk.shape[0], 1
+                )
+                if enable_feature:
+                    with torch.no_grad():
+                        feats = model.forward(
+                            occupied_points_chunk,
+                            data_dict={"normed_timestamps": normed_timestamps},
+                            query_feature_head=True,
+                            query_pe_head=False,
+                        )["dynamic_dino_feat"]
+                    colors = feats @ dummy_pca_reduction
+                    del feats
+                    colors = (colors - color_min) / (color_max - color_min)
+                else:
+                    colors = torch.zeros_like(occupied_points_chunk)
+                    colors[:, 1] = 1    # green
+                dynamic_pca_colors.append(torch.clamp(colors, 0, 1))
+                dynamic_occupied_points.append(occupied_points_chunk)
+            dynamic_coords = [x.cpu().numpy() for x in dynamic_occupied_points]
+            dynamic_colors = [x.cpu().numpy() for x in dynamic_pca_colors]
     else:
         dynamic_coords = None
         dynamic_colors = None
@@ -727,11 +804,11 @@ def visualize_voxels(
     # for plotly
     data = figure.to_dict()["data"]
     layout = figure.to_dict()["layout"]
-    output_path = os.path.join(cfg.log_dir, f"feature_field.json")
+    output_path = os.path.join(out_dir, f"feature_field.json")
     with open(output_path, "w") as f:
         json.dump({"data": data, "layout": layout}, f, cls=NumpyEncoder)
     logger.info(f"Saved to {output_path}")
-    output_path = os.path.join(cfg.log_dir, f"feature_field.html")
+    output_path = os.path.join(out_dir, f"feature_field.html")
     if save_html:
         figure.write_html(output_path)
         logger.info(f"Query result saved to {output_path}")

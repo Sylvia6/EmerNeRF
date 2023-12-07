@@ -7,6 +7,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import Tensor
 from tqdm import trange
+from PIL import Image
 
 from torch.utils.data import ConcatDataset
 
@@ -21,6 +22,7 @@ logger = logging.getLogger()
 
 import pickle, cv2
 from tqdm import tqdm
+import json
 
 #---------------- Cityscapes semantic segmentation
 cityscapes_classes = [
@@ -60,6 +62,37 @@ def cal_shadow_mask(ret, ratio=[1.2, 1.0]):
         ret[y_min:y_max, x_min:x_max] = True
     return ret
 
+def cam_pose_to_nerf(cam_pose, gl=True):  
+    """
+        plus_data的camera为opencv坐标系
+        
+        emernerf的数据坐标输入为opencv坐标，nerfstudio的数据坐标输入为opengl坐标
+        
+        nerf_world与eqdc坐标系一样
+        
+        < opencv / colmap convention >                --->>>     < opengl / NeRF convention >                    --->>>   < world convention >
+        facing [+z] direction, x right, y downwards   --->>>    facing [-z] direction, x right, y upwards        --->>>  facing [+x] direction, z upwards, y left
+                    z                                              y ↑                                                      z ↑    x
+                   ↗                                                 |                                                        |   ↗ 
+                  /                                                  |                                                        |  /
+                 /                                                   |                                                        | /
+                o------> x                                           o------> x                                    y ←--------o
+                |                                                   /
+                |                                                  /
+                |                                               z ↙
+                ↓ 
+                y
+    """
+    if gl:
+        opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
+        opengl2opencv = np.linalg.inv(opencv2opengl)
+        opengl2world = np.array([[0,0,-1,0], [-1,0,0,0], [0,1,0,0],[0,0,0,1]]).astype(float)
+        gl_pose = opencv2opengl @ cam_pose @ opengl2opencv  
+        world_pose = opengl2world @ gl_pose
+    else:
+        opencv2world = np.array([[0,0,1,0], [-1,0,0,0], [0,-1,0,0],[0,0,0,1]]).astype(float)
+        world_pose = opencv2world @ cam_pose
+    return world_pose
 
 class PlusPixelSource(ScenePixelSource):
     ORIGINAL_SIZE = [[540, 960], [540, 960]]
@@ -106,11 +139,15 @@ class PlusPixelSource(ScenePixelSource):
         for t in range(self.start_timestep, self.end_timestep):
             for cam_i in self.camera_list:
                 img_filepath = os.path.join(self.data_path, "images", cam_i, f"{t:06d}.png")
-                mask_filepath = os.path.join(self.data_path, "images", f"{cam_i}_mask", f"{t:06d}.npy")
                 if os.path.exists(img_filepath):
                     img_filepaths.append(img_filepath)
                     selected_steps.append(t)
-                if os.path.exists(mask_filepath):
+                mask_filepath = os.path.join(self.data_path, "images", f"{cam_i}_mask", f"{t:06d}.npy")
+                if not os.path.exists(mask_filepath):
+                    mask_filepath = os.path.join(self.data_path, "box_masks", cam_i, f"{t:06d}.png")
+                if not os.path.exists(mask_filepath):
+                    mask_filepaths.append(None)
+                else:
                     mask_filepaths.append(mask_filepath)
 
         self.img_filepaths = np.array(img_filepaths)
@@ -125,25 +162,19 @@ class PlusPixelSource(ScenePixelSource):
         # to store per-camera intrinsics and extrinsics
 
         # compute per-image poses and intrinsics
-        import json
-        # opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
         data_file = os.path.join(self.data_path, "transforms.json")
         assert os.path.exists(data_file)
         with open(data_file) as f:
             data = json.load(f)
+
         frames = data["frames"]
         cam_ids = np.array([total_camera_dict[frame["cam_name"]] for frame in frames])
         intrs = np.array([frame["intr"] for frame in frames])
-        
-        # base pose in eqdc world
-        self.base_pose = np.array(data["base_pose"])
 
         if self.pose_type == 'odom':
-            c2ws = np.array([frame["transform_matrix"] for frame in frames]) # opengl to opencv ? c2ws @ opencv2opengl 
-            c2w_0 = c2ws[0].copy()
-            c2ws = np.linalg.inv(c2w_0) @ c2ws
+            c2ws = np.array([frame["transform_matrix"] for frame in frames]) 
         elif self.pose_type == 'vio':
-            c2ws = np.array([frame["transform_matrix_vio"] for frame in frames])
+            c2ws = np.array([cam_pose_to_nerf(frame["transform_matrix_vio"], gl=False) for frame in frames])
         else:
             raise ValueError("The pose_type is a ValueError str.")
 
@@ -152,7 +183,7 @@ class PlusPixelSource(ScenePixelSource):
             indices[i::self.num_cams] += i
 
         self.intrinsics = torch.from_numpy(intrs).float()[indices]
-        self.cam_to_worlds = torch.from_numpy(c2ws).float()[indices]
+        self.cam_to_worlds = torch.from_numpy(c2ws)[indices]    # 避免损失eqdc的精度   .float()
         # self.ego_to_worlds = torch.from_numpy(poses_imu_w_tracking).float()
         self.cam_ids = torch.from_numpy(cam_ids).long()[indices]
 
@@ -172,17 +203,24 @@ class PlusPixelSource(ScenePixelSource):
             desc="Loading dynamic masks",
             dynamic_ncols=True,
         ):
-            raw = np.load(fname)
-            ret = np.zeros_like(raw).astype(np.bool8)
-            for cls in cityscapes_dynamic_classes:
-                ind = cityscapes_classes_ind_map[cls]
-                ret[raw==ind] = True
-            
-            # gen shadow mask for test, please set preload=true in config.yaml , ortherwise may reduce speed
-            ret = cal_shadow_mask(ret.squeeze())
-            # resize them to the load_size
-            dyn_mask = cv2.resize(ret.astype(int), (self.data_cfg.load_size[1], self.data_cfg.load_size[0]))
-            dynamic_masks.append(np.array(dyn_mask) > 0)
+            if fname is not None:
+                if fname.endswith(".npy"):
+                    raw = np.load(fname)
+                    ret = np.zeros_like(raw).astype(np.bool8)
+                    for cls in cityscapes_dynamic_classes:
+                        ind = cityscapes_classes_ind_map[cls]
+                        ret[raw==ind] = True                    
+                elif fname.endswith(".png"):
+                    ret = np.array(Image.open(fname).convert("L"))
+                else:
+                    raise TypeError("Error type of mask_file")
+                # gen shadow mask for test, please set preload=true in config.yaml , ortherwise may reduce speed
+                # ret = cal_shadow_mask(ret.squeeze())
+                # resize them to the load_size
+                dyn_mask = cv2.resize(ret.astype(int), (self.data_cfg.load_size[1], self.data_cfg.load_size[0]))
+                dynamic_masks.append(np.array(dyn_mask) > 0)
+            else:
+                dynamic_masks.append(np.zeros((self.data_cfg.load_size[0], self.data_cfg.load_size[1])))
         self.dynamic_masks = torch.from_numpy(np.stack(dynamic_masks, axis=0)).float()
 
 
@@ -196,12 +234,16 @@ class PlusPixelSource(ScenePixelSource):
         for fname in tqdm(
             self.mask_filepaths, desc="Loading sky masks", dynamic_ncols=True
         ):
-            raw = np.load(fname)
-            ret = np.zeros_like(raw).astype(np.bool8)
-            ret[raw==cityscapes_classes_ind_map["sky"]] = True
-            # resize them to the load_size
-            sky_mask = cv2.resize(ret.squeeze().astype(int), (self.data_cfg.load_size[1], self.data_cfg.load_size[0]))
-            sky_masks.append(np.array(sky_mask) > 0)
+            if fname is not None:
+                if fname.endswith(".npy"):
+                    raw = np.load(fname)
+                    ret = np.zeros_like(raw).astype(np.bool8)
+                    ret[raw==cityscapes_classes_ind_map["sky"]] = True
+                    # resize them to the load_size
+                    sky_mask = cv2.resize(ret.squeeze().astype(int), (self.data_cfg.load_size[1], self.data_cfg.load_size[0]))
+                    sky_masks.append(np.array(sky_mask) > 0)
+            else:
+                sky_masks.append(np.zeros((self.data_cfg.load_size[1], self.data_cfg.load_size[0])))
         self.sky_masks = torch.from_numpy(np.stack(sky_masks, axis=0)).float()
 
 
@@ -546,7 +588,41 @@ class PlusDataset(SceneDataset):
             verbose=verbose,
             save_seperate_video=False,
         )
+    
+# 计算平均SE(3)变换
+def average_se3_transformations(transformations):
+    from scipy.spatial.transform import Rotation as R   
+    # 将SE(3)变换矩阵表示为四元数和平移向量
+    def decompose_se3(T):
+        R_matrix = T[:3, :3]
+        translation = T[:3, 3]
+        quat = R.from_matrix(R_matrix).as_quat()
+        return quat, translation
+    # 计算四元数的平均
+    def average_quaternion(quaternions):
+        average_quat = np.mean(quaternions, axis=0)
+        average_quat /= np.linalg.norm(average_quat)
+        return average_quat
 
+    quaternions = []
+    translations = []
+    for T in transformations:
+        quat, translation = decompose_se3(T)
+        quaternions.append(quat)
+        translations.append(translation)
+
+    # 计算四元数的平均
+    average_quat = average_quaternion(quaternions)
+    # 计算平均平移向量
+    average_translation = np.mean(translations, axis=0)
+
+    # 构建平均SE(3)变换矩阵
+    average_rotation_matrix = R.from_quat(average_quat).as_matrix()
+    average_se3 = np.eye(4)
+    average_se3[:3, :3] = average_rotation_matrix
+    average_se3[:3, 3] = average_translation
+
+    return average_se3
         
 class ScenarioDataset(SceneDataset):
     dataset: str = "plus"
@@ -559,8 +635,7 @@ class ScenarioDataset(SceneDataset):
         assert self.data_cfg.dataset == "plus"
 
         self.scenes = {}
-        
-        self.base_scene_id = None
+        c2ws = []
         if "scenarios" in data_cfg:
             for scenario_cfg_str in data_cfg.scenarios:
                 _scene_id, start, stop = [it.strip(" ") for it in scenario_cfg_str.split(",")]
@@ -569,29 +644,33 @@ class ScenarioDataset(SceneDataset):
                 cfg.start_timestep, cfg.end_timestep = int(start), int(stop)
                 dataset = PlusDataset(data_cfg=cfg)
                 self.scenes[_scene_id] = dataset
-                if not self.base_scene_id:
-                    self.base_scene_id = _scene_id
+                c2ws.append(dataset.pixel_source.cam_to_worlds.numpy())
+        c2ws = np.concatenate(c2ws)
 
-        self.base_pose = np.array(self.scenes[self.base_scene_id].pixel_source.base_pose)
+        if cfg.pose_type == 'odom':
+            # rebase the pose and aabb_box of scenario dataset, for multi bag
+            self.base_pose = average_se3_transformations(c2ws)  # ? base eqdc pose
+            aabb_min, aabb_max = -1*torch.ones(3), torch.ones(3)
+            for scene_id, dataset in self.scenes.items():
+                # rebase pose, and transform from opencv coord to world coord
+                c2ws_rebase = [cam_pose_to_nerf(np.linalg.inv(self.base_pose) @ c2w, gl=False) for c2w in dataset.pixel_source.cam_to_worlds.numpy()]
+                dataset.pixel_source.cam_to_worlds = torch.FloatTensor(c2ws_rebase)
+                dataset.aabb = dataset.get_aabb()
+                # cal scenario_aabb
+                aabb_min[aabb_min > dataset.aabb[:3]] =  dataset.aabb[:3][aabb_min > dataset.aabb[:3]]
+                aabb_max[aabb_max < dataset.aabb[3:]] =  dataset.aabb[3:][aabb_max < dataset.aabb[3:]]
+            self.aabb = torch.concatenate([aabb_min, aabb_max])
+        elif cfg.pose_type == 'vio':
+            # only support single bag
+            assert len(self.scenes) == 1
+            self.base_pose = c2ws[0]
+        else:
+            raise ValueError("The pose_type is a ValueError str.")
 
-        aabb_min, aabb_max = -1*torch.ones(3), torch.ones(3)
-        trans_poses = []
-        for scene_id, dataset in self.scenes.items():
-            # rebase_coord to first dataset
-            trans_pose = np.linalg.inv(self.base_pose) @ dataset.pixel_source.base_pose
-            trans_poses.append(trans_pose)
-            # dataset.pixel_source.cam_to_worlds from vio-pose, means: cam_n to cam_0
-            dataset.pixel_source.cam_to_worlds = (torch.from_numpy(trans_pose) @ dataset.pixel_source.cam_to_worlds.double()).float()
-            dataset.aabb = dataset.get_aabb()
-            
-            # cal scenario_aabb
-            aabb_min[aabb_min > dataset.aabb[:3]] =  dataset.aabb[:3][aabb_min > dataset.aabb[:3]]
-            aabb_max[aabb_max < dataset.aabb[3:]] =  dataset.aabb[3:][aabb_max < dataset.aabb[3:]]
-        self.aabb = torch.concatenate([aabb_min, aabb_max])
-        np.save("./scenario_trans_poses.npy", trans_poses)   # concat global.pcd to check trans_pose
+        print(f"Using the pose_type: \n {cfg.pose_type}")
+        print(f"Scenario base_pose: \n {self.base_pose}") 
         # ---- create split wrappers ---- #
         self.build_split_wrapper()
-
         self.pixel_source = {scene_id: dataset.pixel_source for scene_id, dataset in self.scenes.items()}
         self.lidar_source = {scene_id: dataset.pixel_source for scene_id, dataset in self.scenes.items()}
 

@@ -458,25 +458,28 @@ def render_novel(
         roll = np.radians(roll)
         pitch = np.radians(pitch)
         yaw = np.radians(yaw)
-
-        Rx = np.array([[1, 0, 0],
-                    [0, np.cos(roll), -np.sin(roll)],
-                    [0, np.sin(roll), np.cos(roll)]])
-
-        Ry = np.array([[np.cos(pitch), 0, np.sin(pitch)],
-                    [0, 1, 0],
-                    [-np.sin(pitch), 0, np.cos(pitch)]])
-
-        Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0],
-                    [np.sin(yaw), np.cos(yaw), 0],
-                    [0, 0, 1]])
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(roll), -np.sin(roll)],
+            [0, np.sin(roll), np.cos(roll)],
+        ])
+        Ry = np.array([
+            [np.cos(pitch), 0, np.sin(pitch)],
+            [0, 1, 0],
+            [-np.sin(pitch), 0, np.cos(pitch)],
+        ])
+        Rz = np.array([
+            [np.cos(yaw), -np.sin(yaw), 0], 
+            [np.sin(yaw), np.cos(yaw), 0], 
+            [0, 0, 1]
+        ])
 
         R = np.dot(Rz, np.dot(Ry, Rx))
         ret[:3, :3] = R
         return ret
 
     if args.nvs_param is not None:
-        roll, pitch, yaw = [float(i) for i in args.nvs_param.split(',')]
+        roll, pitch, yaw = [float(i) for i in args.nvs_param.split(",")]
         novel_trans = torch.from_numpy(rotation_matrix(roll, pitch, yaw)).type(torch.FloatTensor).to(model.device)
 
     video_output_pth = os.path.join(cfg.log_dir, "novel", "novel.mp4")
@@ -519,17 +522,17 @@ def main(args):
         from datasets.waymo import WaymoDataset
 
         dataset = WaymoDataset(data_cfg=cfg.data)
-    elif cfg.data.dataset == 'nuscenes':
+    elif cfg.data.dataset == "nuscenes":
         from datasets.nuscenes import NuScenesDataset
 
         dataset = NuScenesDataset(data_cfg=cfg.data)    
-    elif cfg.data.dataset == 'plus':
+    elif cfg.data.dataset == "plus":
         from datasets.plus import PlusDataset
 
         dataset = PlusDataset(data_cfg=cfg.data)   
     else:
-        raise NotImplementedError('Error data type')
-    
+        raise NotImplementedError("Error data type")
+
     # To give us a quick preview of the scene, we render a data video
     if args.render_data_video or args.render_data_video_only:
         save_pth = os.path.join(cfg.log_dir, "data.mp4")
@@ -754,7 +757,7 @@ def main(args):
             )
             if sky_loss_fn is not None:  # if sky loss is enabled
                 if cfg.supervision.sky.loss_type == "weights_based":
-                    # penalize the points' weights if they point to the sky
+                    # penalize the points weights if they point to the sky
                     pixel_loss_dict.update(
                         sky_loss_fn(
                             render_results["extras"]["weights"],
