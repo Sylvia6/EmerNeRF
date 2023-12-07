@@ -8,7 +8,7 @@ data:
   pixel_source:
     load_size: [540, 960]
     num_cams: 2
-    load_dynamic_mask: True
+    load_dynamic_mask: False 
     load_sky_mask: False
   lidar_source:
     load_lidar: False 
@@ -22,42 +22,6 @@ nerf:
       enable_flow_branch: True  # whether to use flow branch
       # ========== sky =========== #
       enable_sky_head: False # will also initialize a feature sky head when a feature head is enabled
-
-supervision: # supervision hyperparameters
-  # rgb: # rgb supervision
-  #   loss_type: l2 # choose from ["l1", "smooth_l1", "l2"]
-  #   loss_coef: 1.0 # didn't do any ablation study on this
-  depth: # depth supervision
-    loss_type: l2 # choose from ["l1", "smooth_l1", "l2"]
-    enable: True # whether to use depth supervision
-    loss_coef: 1.0 # didn't do any ablation study on this
-    depth_error_percentile: null # placeholder for future use. lidar becomes less accurate when it's far away from the ego vehicle. we can use this to weight the depth supervision.
-    line_of_sight:
-      enable: True
-      loss_type: "my" # self-implemented line-of-sight loss
-      loss_coef: 0.1 # how about 0.01?
-      start_iter: 2000 # when to start using line-of-sight loss
-      # if your flow field is not accurate or collapsed, 
-      # you may want to use a stronger line-of-sight loss
-      # e.g., reduce start_epsilon to 3.0 and end_epsilon to 1.0
-      # but it will lower PSNR
-      start_epsilon: 6.0 # initial epsilon for line-of-sight loss
-      end_epsilon: 2.5 # final epsilon for line-of-sight loss
-      decay_steps: 5000 # how many steps to decay loss_coef
-      decay_rate: 0.5 # decay rate for loss_coef
-  # sky: # sky supervision
-  #   loss_type: opacity_based # choose from ["opacity_based", "weights_based"]
-  #   loss_coef: 0.001
-  # feature: # feature supervision
-  #   loss_type: l2 # choose from ["l1", "smooth_l1", "l2"]
-  #   loss_coef: 0.5 # didn't do any ablation study on this
-  dynamic: # dynamic regularization
-    loss_type: sparsity 
-    loss_coef: 0.005  # 0.01
-    # entropy_loss_skewness: 1.1 # TODO: we didn't study this yet
-  # shadow: # shadow regularization
-  #   loss_type: sparsity
-  #   loss_coef: 0.01
 
 logging:
   vis_freq: 1000 # how often to visualize training stats

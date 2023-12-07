@@ -171,19 +171,20 @@ class PlusPixelSource(ScenePixelSource):
         cam_ids = np.array([total_camera_dict[frame["cam_name"]] for frame in frames])
         intrs = np.array([frame["intr"] for frame in frames])
 
-        if self.pose_type == 'odom':
-            c2ws = np.array([frame["transform_matrix"] for frame in frames]) 
-        elif self.pose_type == 'vio':
-            c2ws = np.array([cam_pose_to_nerf(frame["transform_matrix_vio"], gl=False) for frame in frames])
-        else:
-            raise ValueError("The pose_type is a ValueError str.")
-
         indices = self.selected_steps * self.num_cams
         for i in range(self.num_cams):
             indices[i::self.num_cams] += i
 
+        if self.pose_type == 'odom':
+            c2ws = np.array([frame["transform_matrix"] for frame in frames]) 
+            self.cam_to_worlds = torch.from_numpy(c2ws)[indices]    # 避免eqdc的精度损失
+        elif self.pose_type == 'vio':
+            c2ws = np.array([cam_pose_to_nerf(frame["transform_matrix_vio"], gl=False) for frame in frames])
+            self.cam_to_worlds = torch.from_numpy(c2ws)[indices].float()
+        else:
+            raise ValueError("The pose_type is a ValueError str.")
+
         self.intrinsics = torch.from_numpy(intrs).float()[indices]
-        self.cam_to_worlds = torch.from_numpy(c2ws)[indices]    # 避免损失eqdc的精度   .float()
         # self.ego_to_worlds = torch.from_numpy(poses_imu_w_tracking).float()
         self.cam_ids = torch.from_numpy(cam_ids).long()[indices]
 
@@ -647,6 +648,7 @@ class ScenarioDataset(SceneDataset):
                 c2ws.append(dataset.pixel_source.cam_to_worlds.numpy())
         c2ws = np.concatenate(c2ws)
 
+        self.base_pose = np.eye(4)
         if cfg.pose_type == 'odom':
             # rebase the pose and aabb_box of scenario dataset, for multi bag
             self.base_pose = average_se3_transformations(c2ws)  # ? base eqdc pose
