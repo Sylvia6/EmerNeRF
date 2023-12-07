@@ -22,6 +22,7 @@ from plus_general.utils.config_utils2 import CfgNode
 import pickle
 import plus_general.utils.calibration_utils as calibration_utils
 
+from scipy.spatial.transform import Rotation as R   
 
 def save_pickle(obj, path):
     with open(path, "wb") as f:
@@ -292,12 +293,20 @@ class Pipeline(object):
         save_pickle(results, self.path_manager.pose_path)
 
     @cache_pipeline
-    def extract_global_cloud(self):
+    def extract_global_cloud(self, poses=[], suffix=""):
         all_colors = []
         all_points = []
-        pose_results = load_pickle(self.path_manager.pose_path)
+        if len(poses) <= 0:
+            poses = load_pickle(self.path_manager.pose_path) # vio-pose
+        else:
+            poses = [[i, 0, pose] for i, pose in enumerate(poses)]
 
-        for pose_idx, (id, timestamp, pose) in enumerate(tqdm.tqdm(pose_results)):
+        # pose_results_dom = [
+        #     load_pickle(os.path.join(self.path_manager.frame_root, frame))
+        #     for frame in sorted(os.listdir(self.path_manager.frame_root))
+        #     ]
+        # for pose_idx, (id, timestamp, pose) in enumerate(tqdm.tqdm(pose_results_dom)):
+        for pose_idx, (id, timestamp, pose) in enumerate(tqdm.tqdm(poses)):
             im_path = os.path.join(self.path_manager.stereo_cache_root, "{}.jpg".format(id))
             mat_path = os.path.join(self.path_manager.stereo_cache_root, "{}.npz".format(id))
             if not os.path.exists(mat_path):
@@ -327,7 +336,10 @@ class Pipeline(object):
                 all_points.append(points_3d)
         all_points = np.concatenate(all_points, 0)
         all_colors = np.concatenate(all_colors, 0)
-        writepath = self.path_manager.join_root("global.pcd")
+        if suffix == "":
+            writepath = self.path_manager.join_root(f"global.pcd")
+        else:
+            writepath = self.path_manager.join_root(f"global_{suffix}.pcd")
         write_color_pcd(all_points, all_colors, writepath)
 
     def get_calibrator(self):
@@ -360,13 +372,10 @@ class Pipeline(object):
             pose_dict[ts] = pose
         
         localization_topic = "/localization/state"
+        # lidar_topic = "/rslidar_points"
         other_topics = [localization_topic]
         bag_handler = ImageBagHandler(self.path_manager.bag_name, front_left=True, front_right=True,
                                       odom=True, other_topics=other_topics)
-        
-        # # 世界坐标系
-        # bag_handler.odom_topic = "/plus/odom"
-        # bag_handler.bag_handler.set_odom_topics(["/plus/odom"])
 
         h, w = self.calibrator.calib_params_dict["stereo"]["height"], self.calibrator.calib_params_dict["stereo"]["width"]
         p1 = np.array(self.calibrator.calib_params_dict["stereo"]["P1"])
@@ -380,27 +389,58 @@ class Pipeline(object):
         for cam_dir in cam_dirs:
             os.makedirs(cam_dir, exist_ok=True)
           
-        opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
-        opengl2opencv = np.linalg.inv(opencv2opengl)
-        opengl2world = np.array([[0,0,-1,0], [-1,0,0,0], [0,1,0, 0],[0,0,0,1]]).astype(float)
-
-        def cam_pose_to_nerf(cam_pose):
-            gl_pose = opencv2opengl.dot(cam_pose.dot(opengl2opencv))  
-            world_pose = opengl2world.dot(gl_pose)
-            return world_pose.tolist()
-
         lc_to_imu = self.calibrator.calib_params_dict["stereo"]["Tr_cam_to_imu"]
         rc_to_imu = lc_to_imu @ np.linalg.inv(cam_t_pose)
 
-        first_c2w = None
+        eqdcs = []
+        vios = []
+        for idx, msg_dict in enumerate(tqdm.tqdm(bag_handler.msg_generator(to_image=True))):
+            left_image_timestamp = msg_dict["front_left"].timestamp.to_sec()
+            if left_image_timestamp not in pose_dict:
+                print(f"pass frame {idx}......")
+                continue
+            
+            lc_to_w_vio = pose_dict[left_image_timestamp]   # 相对first_frame的pose
+            vios.append(lc_to_w_vio)
 
+            if localization_topic in msg_dict.keys():
+                pb = localization_pb2.LocalizationEstimation()
+                pb.ParseFromString(msg_dict[localization_topic][0].message.data)
+                pos, quat = pb.position, pb.orientation
+                ret = quat_xyz_to_matrix([quat.qx, quat.qy, quat.qz, quat.qw], [pos.x, pos.y, pos.z])
+                eqdcs.append(ret @ lc_to_imu)
+        
+        eqdcs = np.array(eqdcs) 
+        vios = np.array(vios)
+
+        window_size = 10 // 2
+        eqdc_fine = []
+
+        # window_slide eqdc to make it smooth
+        for i in range(len(eqdcs)):
+            # window to i
+            window_eqdcs = np.linalg.inv(eqdcs[i]) @ eqdcs[max(0, i - window_size) : min(len(eqdcs), i + window_size)]
+            window_vios = np.linalg.inv(vios[i]) @ vios[max(0, i - window_size) : min(len(vios), i + window_size)]
+            
+            trans = np.array([np.linalg.inv(window_vios[j]) @ window_eqdcs[j] for j in range(len(window_eqdcs))])
+            # trans = np.array([np.linalg.inv(window_eqdcs[j]) @ window_vios[j] for j in range(len(window_eqdcs))])
+            mean_trans = average_se3_transformations(trans)
+            eqdc_fine.append(eqdcs[i] @ mean_trans)
+
+        eqdc_fine = np.array(eqdc_fine)
+        imu_eqdc = eqdc_fine @ np.linalg.inv(np.asarray(lc_to_imu))
+
+        # base_pose = eqdc_fine[0]
+        # eqdc_to_0 = np.linalg.inv(base_pose) @ eqdc_fine
+        # self.extract_global_cloud(poses=eqdc_fine, suffix="eqdc_vio")
+        
         frames = []
         for idx, msg_dict in enumerate(tqdm.tqdm(bag_handler.msg_generator(to_image=True))):
             left_image_timestamp = msg_dict["front_left"].timestamp.to_sec()
             if left_image_timestamp not in pose_dict:
                 print(f"pass frame {idx}......")
                 continue
-                
+
             # image 
             left = msg_dict["front_left"].message
             left_unwarp = self.calibrator.unwarp(left, "stereo", 0)
@@ -408,19 +448,12 @@ class Pipeline(object):
             right_unwarp = self.calibrator.unwarp(right, "stereo", 1)
 
             # pose 
-            #       1. odom pose
-            imu_to_w, pose = np.matrix(msg_dict["imu_to_world"]), msg_dict["pose"]
+            #       1. odom pose / eqdc pose
+            # imu_to_w, pose = np.matrix(msg_dict["imu_to_world"]), msg_dict["pose"]    # odom
+            imu_to_w = imu_eqdc[idx]    # eqdc
             lc_to_w = imu_to_w @ lc_to_imu
             rc_to_w = lc_to_w @ np.linalg.inv(cam_t_pose)
 
-            if first_c2w is None:
-                if localization_topic in msg_dict.keys():
-                    pb = localization_pb2.LocalizationEstimation()
-                    pb.ParseFromString(msg_dict[localization_topic][0].message.data)
-                    pos, quat = pb.position, pb.orientation
-                    ret = quat_xyz_to_matrix(quat.qx, quat.qy, quat.qz, quat.qw, pos.x, pos.y, pos.z)
-                    first_c2w = ret @ lc_to_imu
-                
             #       2. vio pose
             lc_to_w_vio = pose_dict[left_image_timestamp]   # 相对first_frame的pose
             rc_to_w_vio = lc_to_w_vio @ np.linalg.inv(cam_t_pose)
@@ -428,7 +461,7 @@ class Pipeline(object):
 
             frames.append({
                 "file_path": "images/front_left/{:06d}.png".format(idx),
-                "transform_matrix": lc_to_w.tolist(),   # cam_pose_to_nerf
+                "transform_matrix": lc_to_w.tolist(), 
                 "transform_matrix_vio": lc_to_w_vio.tolist(),
                 "imu2w": imu_to_w.tolist(),
                 "imu2w_vio": imu_to_w_vio.tolist(), 
@@ -469,7 +502,6 @@ class Pipeline(object):
             "k4": 0, # fourth radial distorial parameter, used by [OPENCV_FISHEYE]
             "p1": 0, # first tangential distortion parameter, used by [OPENCV]
             "p2": 0, # second tangential distortion parameter, used by [OPENCV]
-            "base_pose": first_c2w.tolist()
         }
         transforms_data["frames"] = frames
         transfrom_json_fpath = self.path_manager.join_root("transforms.json")
@@ -556,15 +588,79 @@ class Pipeline(object):
         if self.cfg.clear_cache:
             self.clear_cache()
 
-def quat_xyz_to_matrix(qx, qy, qz, qw, x, y, z):
-    ret = np.array([
-            [1 - 2*qy**2 - 2*qz**2, 2*qx*qy - 2*qw*qz, 2*qx*qz + 2*qw*qy, x],
-            [2*qx*qy + 2*qw*qz, 1 - 2*qx**2 - 2*qz**2, 2*qy*qz - 2*qw*qx, y],
-            [2*qx*qz - 2*qw*qy, 2*qy*qz + 2*qw*qx, 1 - 2*qx**2 - 2*qy**2, z],
-            [0, 0, 0, 1]
-        ])
+
+def quat_xyz_to_matrix(quat, translation):
+    ret = np.eye(4)
+    ret[:3,:3] = R.from_quat(quat).as_matrix()
+    ret[:3,-1] = translation
     return ret
 
+# 计算平均SE(3)变换
+def average_se3_transformations(transformations):
+    # 将SE(3)变换矩阵表示为四元数和平移向量
+    def decompose_se3(T):
+        R_matrix = T[:3, :3]
+        translation = T[:3, 3]
+        quat = R.from_matrix(R_matrix).as_quat()
+        return quat, translation
+    # 计算四元数的平均
+    def average_quaternion(quaternions):
+        average_quat = np.mean(quaternions, axis=0)
+        average_quat /= np.linalg.norm(average_quat)
+        return average_quat
+
+    quaternions = []
+    translations = []
+    for T in transformations:
+        quat, translation = decompose_se3(T)
+        quaternions.append(quat)
+        translations.append(translation)
+
+    # 计算四元数的平均
+    average_quat = average_quaternion(quaternions)
+
+    # 计算平均平移向量
+    average_translation = np.mean(translations, axis=0)
+
+    # 构建平均SE(3)变换矩阵
+    average_rotation_matrix = R.from_quat(average_quat).as_matrix()
+    average_se3 = np.eye(4)
+    average_se3[:3, :3] = average_rotation_matrix
+    average_se3[:3, 3] = average_translation
+
+    return average_se3
+
+def cam_pose_to_nerf(cam_pose, gl=True):  
+    """
+        plus_data的camera为opencv坐标系
+        
+        emernerf的数据坐标输入为opencv坐标，nerfstudio的数据坐标输入为opengl坐标
+        
+        nerf_world与eqdc坐标系一样
+        
+        < opencv / colmap convention >                --->>>     < opengl / NeRF convention >                    --->>>   < world convention >
+        facing [+z] direction, x right, y downwards   --->>>    facing [-z] direction, x right, y upwards        --->>>  facing [+x] direction, z upwards, y left
+                    z                                              y ↑                                                      z ↑    x
+                   ↗                                                 |                                                        |   ↗ 
+                  /                                                  |                                                        |  /
+                 /                                                   |                                                        | /
+                o------> x                                           o------> x                                    y ←--------o
+                |                                                   /
+                |                                                  /
+                |                                               z ↙
+                ↓ 
+                y
+    """
+    if gl:
+        opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
+        opengl2opencv = np.linalg.inv(opencv2opengl)
+        opengl2world = np.array([[0,0,-1,0], [-1,0,0,0], [0,1,0,0],[0,0,0,1]]).astype(float)
+        gl_pose = opencv2opengl @ cam_pose @ opengl2opencv  
+        world_pose = opengl2world @ gl_pose
+    else:
+        opencv2world = np.array([[0,0,1,0], [-1,0,0,0], [0,-1,0,0],[0,0,0,1]]).astype(float)
+        world_pose = opencv2world @ cam_pose
+    return world_pose
 
 if __name__ == "__main__":
     cfg = PipelineCfg()
