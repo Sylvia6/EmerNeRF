@@ -1,17 +1,19 @@
 data:
   pose_type: vio
-  data_root: /data/plus_data
+  data_root: /mnt/intel/jupyterhub/lu.li/plus_data/area
   dataset: plus
   preload_device: cpu  
   ray_batch_size: 6000 #4096 # ray batch size for training, it's embedded in the dataset class for now
-  scene_idx: 20231102T120243_pdb-l4e-b0001_7_2to9
+  scene_idx: 20221228T111336_pdb-l4e-b0002_20_1to21
   pixel_source:
+    load_rgb: True
     load_size: [540, 960]
     num_cams: 2
     load_dynamic_mask: False 
-    load_sky_mask: False
+    load_sky_mask: True
   lidar_source:
-    load_lidar: False 
+    num_cams: 2
+    load_lidar: True
 render:
   vis_voxel_size: 0.1 
 nerf:
@@ -21,7 +23,7 @@ nerf:
       enable_shadow_head: True # whether to use shadow head
       enable_flow_branch: True  # whether to use flow branch
       # ========== sky =========== #
-      enable_sky_head: False # will also initialize a feature sky head when a feature head is enabled
+      enable_sky_head: True # will also initialize a feature sky head when a feature head is enabled
 
 logging:
   vis_freq: 1000 # how often to visualize training stats

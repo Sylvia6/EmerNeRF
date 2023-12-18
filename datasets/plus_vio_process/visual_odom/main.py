@@ -12,6 +12,7 @@ from plus_general.utils.calibrator import Calibrator, SearchPolicy
 from plus_general.utils.calibration_utils import load_opencv_yaml
 from plus_general.utils.io_utils import get_file
 from plus_general.utils.pcl_utils import write_color_pcd, write_pcd, write_type_pcd
+from plus_general.utils.point_cloud2 import read_points
 from visual_odom.utils import make_dir, extract_point_cloud, generate_obstacle_mask, extract_single_point_cloud
 from visual_odom.core import Frame, load_frame, save_frame
 import torch.nn.functional as F
@@ -372,8 +373,8 @@ class Pipeline(object):
             pose_dict[ts] = pose
         
         localization_topic = "/localization/state"
-        # lidar_topic = "/rslidar_points"
-        other_topics = [localization_topic]
+        lidar_topic = "/rslidar_points"
+        other_topics = [localization_topic, lidar_topic]
         bag_handler = ImageBagHandler(self.path_manager.bag_name, front_left=True, front_right=True,
                                       odom=True, other_topics=other_topics)
 
@@ -435,11 +436,27 @@ class Pipeline(object):
         # self.extract_global_cloud(poses=eqdc_fine, suffix="eqdc_vio")
         
         frames = []
+        tmp_idx = -1    # 索引记录未丢帧的pose数据
         for idx, msg_dict in enumerate(tqdm.tqdm(bag_handler.msg_generator(to_image=True))):
             left_image_timestamp = msg_dict["front_left"].timestamp.to_sec()
             if left_image_timestamp not in pose_dict:
                 print(f"pass frame {idx}......")
+                tmp_idx -= 1
                 continue
+            else:
+                tmp_idx += 1
+
+            # lidar
+            lidar_pts = None
+            if lidar_topic in msg_dict:
+                pc_msg = msg_dict[lidar_topic][0].message
+                if lidar_topic == '/livox/lidar' or lidar_topic == '/rslidar_points' or lidar_topic == '/innovusion_lidar/iv_points':
+                    lidar_pts = np.array(list(read_points(pc_msg, field_names=['x', 'y', 'z', 'intensity'], skip_nans=True)), dtype=np.float32)
+                    lidar_pts[:,:3] = lidar_pts[:,:3] * 0.01
+                else:
+                    lidar_pts = np.array(list(read_points(pc_msg, field_names=['x', 'y', 'z', 'intensity', 'ring'], skip_nans=True)), dtype=np.float32)
+            if lidar_pts is not None:
+                lidar_pts.tofile(os.path.join(self.path_manager.cloud_root, f"{idx:06d}.bin"))
 
             # image 
             left = msg_dict["front_left"].message
@@ -450,7 +467,7 @@ class Pipeline(object):
             # pose 
             #       1. odom pose / eqdc pose
             # imu_to_w, pose = np.matrix(msg_dict["imu_to_world"]), msg_dict["pose"]    # odom
-            imu_to_w = imu_eqdc[idx]    # eqdc
+            imu_to_w = imu_eqdc[tmp_idx]    # eqdc
             lc_to_w = imu_to_w @ lc_to_imu
             rc_to_w = lc_to_w @ np.linalg.inv(cam_t_pose)
 
@@ -460,6 +477,7 @@ class Pipeline(object):
             imu_to_w_vio = lc_to_w_vio @ np.linalg.inv(lc_to_imu)
 
             frames.append({
+                "idx": "{:06d}".format(idx),
                 "file_path": "images/front_left/{:06d}.png".format(idx),
                 "transform_matrix": lc_to_w.tolist(), 
                 "transform_matrix_vio": lc_to_w_vio.tolist(),
@@ -473,7 +491,8 @@ class Pipeline(object):
             cv2.imwrite(os.path.join(image_save_dir, "front_left", "{:06d}.png".format(idx)), left_unwarp)
 
             frames.append({
-                "file_path": "images/front_right/_{:06d}.png".format(idx),
+                "idx": "{:06d}".format(idx),
+                "file_path": "images/front_right/{:06d}.png".format(idx),
                 "transform_matrix": rc_to_w.tolist(),
                 "transform_matrix_vio": rc_to_w_vio.tolist(),
                 "imu2w": imu_to_w.tolist(),
