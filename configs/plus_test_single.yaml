@@ -1,10 +1,10 @@
 data:
   pose_type: vio
-  data_root: /mnt/intel/jupyterhub/lu.li/plus_data/area
+  data_root: /data/plus_data
   dataset: plus
   preload_device: cpu  
   ray_batch_size: 6000 #4096 # ray batch size for training, it's embedded in the dataset class for now
-  scene_idx: 20221228T111336_pdb-l4e-b0002_20_1to21
+  scene_idx: 20230319T090808_pdb-l4e-b0007_6_871to931
   pixel_source:
     load_rgb: True
     load_size: [540, 960]
@@ -31,4 +31,5 @@ logging:
 #   saveckpt_freq: 50 # how often to save checkpoints
 #   save_seperate_video: True # whether to save seperate video for each rendered key
 optim: # optimization hyperparameters
-  num_iters: 25000 # number of iterations to train
+  num_iters: 5000
+  # 25000 # number of iterations to train

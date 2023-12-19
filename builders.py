@@ -89,6 +89,21 @@ def build_optimizer_from_cfg(
         weight_decay=cfg.weight_decay,
         betas=(0.9, 0.99),
     )
+
+    # dynamic_flow_params = list(model.dynamic_xyz_encoder.parameters()) + list(model.dynamic_base_mlp.parameters()) + \
+    #     list(model.flow_xyz_encoder.parameters()) + list(model.flow_mlp.parameters())
+    # orthers_params  = set(model.parameters()) - set(dynamic_flow_params)
+    # optimizer = torch.optim.Adam(
+    #     [
+    #         {'params': list(orthers_params)},
+    #         {'params': dynamic_flow_params, 'lr': cfg.lr * 3}
+    #     ],
+    #     lr=cfg.lr,
+    #     eps=1e-15,
+    #     weight_decay=cfg.weight_decay,
+    #     betas=(0.9, 0.99),
+    # )
+
     return optimizer
 
 

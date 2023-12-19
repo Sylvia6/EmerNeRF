@@ -129,26 +129,35 @@ class PlusPixelSource(ScenePixelSource):
             raise NotImplementedError(
                 f"num_cams: {self.num_cams} not supported for plus dataset"
             )
+        
+        data_file = os.path.join(self.data_path, "transforms.json")
+        assert os.path.exists(data_file)
+        with open(data_file) as f:
+            data = json.load(f)        
+        self.frames = data["frames"][self.start_timestep : self.end_timestep * self.num_cams]
 
         # ---- define filepaths ---- #
         img_filepaths, feat_filepaths = [], []
         mask_filepaths = []
-        selected_steps = []    # 可用帧的数据在self.start_timestep到self.end_timestep中的indice
+        selected_steps = []
 
         # Note: we assume all the files in plus dataset are synchronized
-        for t in range(self.start_timestep, self.end_timestep):
-            for cam_i in self.camera_list:
-                img_filepath = os.path.join(self.data_path, "images", cam_i, f"{t:06d}.png")
-                if os.path.exists(img_filepath):
-                    img_filepaths.append(img_filepath)
-                    selected_steps.append(t)
-                mask_filepath = os.path.join(self.data_path, "images", f"{cam_i}_mask", f"{t:06d}.npy")
-                if not os.path.exists(mask_filepath):
-                    mask_filepath = os.path.join(self.data_path, "box_masks", cam_i, f"{t:06d}.png")
-                if not os.path.exists(mask_filepath):
-                    mask_filepaths.append(None)
-                else:
-                    mask_filepaths.append(mask_filepath)
+        # for t in range(self.start_timestep, self.end_timestep):
+        for f in self.frames:
+            t = int(f["file_path"].split("/")[-1][:-4])
+            selected_steps.append(t)
+
+            cam_i = f["cam_name"]
+            img_filepath = os.path.join(self.data_path, "images", cam_i, f"{t:06d}.png")
+            if os.path.exists(img_filepath):
+                img_filepaths.append(img_filepath)
+            mask_filepath = os.path.join(self.data_path, "images", f"{cam_i}_mask", f"{t:06d}.npy")
+            if not os.path.exists(mask_filepath):
+                mask_filepath = os.path.join(self.data_path, "box_masks", cam_i, f"{t:06d}.png")
+            if not os.path.exists(mask_filepath):
+                mask_filepaths.append(None)
+            else:
+                mask_filepaths.append(mask_filepath)
 
         self.img_filepaths = np.array(img_filepaths)
         self.mask_filepaths = np.array(mask_filepaths)
@@ -162,31 +171,25 @@ class PlusPixelSource(ScenePixelSource):
         # to store per-camera intrinsics and extrinsics
 
         # compute per-image poses and intrinsics
-        data_file = os.path.join(self.data_path, "transforms.json")
-        assert os.path.exists(data_file)
-        with open(data_file) as f:
-            data = json.load(f)
-
-        frames = data["frames"]
-        cam_ids = np.array([total_camera_dict[frame["cam_name"]] for frame in frames])
-        intrs = np.array([frame["intr"] for frame in frames])
-
-        indices = self.selected_steps * self.num_cams
-        for i in range(self.num_cams):
-            indices[i::self.num_cams] += i
+        cam_ids = np.array([total_camera_dict[frame["cam_name"]] for frame in self.frames])
+        intrs = np.array([frame["intr"] for frame in self.frames])
 
         if self.pose_type == 'odom':
-            c2ws = np.array([frame["transform_matrix"] for frame in frames]) 
-            self.cam_to_worlds = torch.from_numpy(c2ws)[indices]    # 避免eqdc的精度损失
+            c2ws = np.array([frame["transform_matrix"] for frame in self.frames]) 
+            self.cam_to_worlds = torch.from_numpy(c2ws)    # 避免eqdc的精度损失
         elif self.pose_type == 'vio':
-            c2ws = np.array([cam_pose_to_nerf(frame["transform_matrix_vio"], gl=False) for frame in frames])
-            self.cam_to_worlds = torch.from_numpy(c2ws)[indices].float()
+            # temp for demo 
+            # opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
+            # c2ws = np.array([frame["transform_matrix_vio"]@ opencv2opengl for frame in self.frames])
+
+            c2ws = np.array([cam_pose_to_nerf(frame["transform_matrix_vio"], gl=False) for frame in self.frames])
+            self.cam_to_worlds = torch.from_numpy(c2ws).float()
         else:
             raise ValueError("The pose_type is a ValueError str.")
 
-        self.intrinsics = torch.from_numpy(intrs).float()[indices]
-        # self.ego_to_worlds = torch.from_numpy(poses_imu_w_tracking).float()
-        self.cam_ids = torch.from_numpy(cam_ids).long()[indices]
+        self.intrinsics = torch.from_numpy(intrs).float()
+        self.ego_to_worlds = torch.FloatTensor([c2ws[i] @ np.linalg.inv(f["c2imu"]) for i, f in enumerate(self.frames)])
+        self.cam_ids = torch.from_numpy(cam_ids).long()
 
         # the underscore here is important.
         self._timestamps = torch.from_numpy(self.selected_steps-self.start_timestep).float()
@@ -246,6 +249,121 @@ class PlusPixelSource(ScenePixelSource):
             else:
                 sky_masks.append(np.zeros((self.data_cfg.load_size[1], self.data_cfg.load_size[0])))
         self.sky_masks = torch.from_numpy(np.stack(sky_masks, axis=0)).float()
+
+
+class PlusLiDARSource(SceneLidarSource):
+    def __init__(
+        self,
+        lidar_data_config: OmegaConf,
+        data_path: str,
+        start_timestep: int,
+        end_timestep: int,
+        device: torch.device = torch.device("cpu"),
+        pose_type: str = "vio",
+        scene_id: str = None,
+    ):
+        super().__init__(lidar_data_config, device=device)
+        self.data_path = data_path
+        self.pose_type = pose_type
+        self.start_timestep = start_timestep
+        self.end_timestep = end_timestep
+        self.scene_id = scene_id
+        self.create_all_filelist()
+        self.load_data()
+
+    def create_all_filelist(self):
+        """
+        Create a list of all the files in the dataset.
+        e.g., a list of all the lidar scans in the dataset.
+        """
+        data_file = os.path.join(self.data_path, "transforms.json")
+        assert os.path.exists(data_file)
+        with open(data_file) as f:
+            data = json.load(f)        
+        self.frames = data["frames"][self.start_timestep : self.end_timestep * self.data_cfg.num_cams][::self.data_cfg.num_cams]
+        
+        lidar_filepaths = []
+        selected_steps = []
+        for f in self.frames:
+            t = int(f["file_path"].split("/")[-1][:-4])
+            selected_steps.append(t)
+            
+            lidar_filepaths.append(
+                os.path.join(self.data_path, "cloud", f"{t:06d}.bin")
+            )
+        self.lidar_filepaths = np.array(lidar_filepaths)
+        self.selected_steps = np.array(selected_steps)
+
+    def load_calibrations(self):
+        """
+        Load the calibration files of the dataset.
+        e.g., lidar to world transformation matrices.
+        """
+        
+        # we tranform the poses w.r.t. the first timestep to make the origin of the
+        # first ego pose as the origin of the world coordinate system.
+        if self.pose_type == 'odom':
+            l2ws = np.array([frame["imu2w"] for frame in self.frames]) 
+            self.lidar_to_worlds = torch.from_numpy(l2ws)    # 避免eqdc的精度损失
+        elif self.pose_type == 'vio':
+            # due to camera transform
+            l2ws = np.array([cam_pose_to_nerf(frame["imu2w_vio"], gl=False) for frame in self.frames])
+            self.lidar_to_worlds = torch.from_numpy(l2ws).float()
+        else:
+            raise ValueError("The pose_type is a ValueError str.")
+
+
+    def load_lidar(self):
+        """
+        Load the lidar data of the dataset from the filelist.
+        """
+        origins, directions, ranges, laser_ids = [], [], [], []
+        # flow/ground info are used for evaluation only
+        flows, flow_classes, grounds = [], [], []
+        # in plus, we simplify timestamps as the time indices
+        timestamps, timesteps = [], []
+        accumulated_num_rays = 0
+        for t in trange(
+            0, len(self.lidar_filepaths), desc="Loading lidar", dynamic_ncols=True
+        ):
+            # each lidar_info contains an Nx14 array
+            # from left to right:
+            # origins: 3d, points: 3d, flows: 3d, flow_class: 1d,
+            # ground_labels: 1d, intensities: 1d, elongations: 1d, laser_ids: 1d
+            lidar_origins = torch.zeros(1,3)
+            lidar_points = torch.from_numpy(np.fromfile(self.lidar_filepaths[t], dtype=np.float32).reshape(-1,4)[:,:3]).float()
+            # transform lidar points from lidar coordinate system to world coordinate system
+            lidar_origins = (
+                self.lidar_to_worlds[t][:3, :3] @ lidar_origins.T
+                + self.lidar_to_worlds[t][:3, 3:4]
+            ).T 
+            lidar_points = (
+                self.lidar_to_worlds[t][:3, :3] @ lidar_points.T
+                + self.lidar_to_worlds[t][:3, 3:4]
+            ).T
+            lidar_directions = lidar_points - lidar_origins
+            lidar_ranges = torch.norm(lidar_directions, dim=-1, keepdim=True)
+            lidar_directions = lidar_directions / lidar_ranges
+            accumulated_num_rays += len(lidar_ranges)
+
+            origins.append(lidar_origins.repeat(len(lidar_ranges), 1))
+            directions.append(lidar_directions)
+            ranges.append(lidar_ranges)
+
+            # we use time indices as the timestamp for waymo dataset
+            lidar_timestamp = torch.ones_like(lidar_ranges).squeeze(-1) * self.selected_steps[t]
+            timestamps.append(lidar_timestamp)
+            timesteps.append(lidar_timestamp)
+        
+        logger.info(
+            f"Number of lidar rays: {accumulated_num_rays} "
+        )
+        self.origins = torch.cat(origins, dim=0)
+        self.directions = torch.cat(directions, dim=0)
+        self.ranges = torch.cat(ranges, dim=0)
+
+        self._timestamps = (torch.cat(timestamps, dim=0)-self.start_timestep).float()
+        self._timesteps = (torch.cat(timesteps, dim=0)-self.start_timestep).long()
 
 
 class PlusDataset(SceneDataset):
@@ -362,7 +480,6 @@ class PlusDataset(SceneDataset):
         )
 
         if load_pixel:
-            # pose_type = self.data_cfg.pose_type if "pose_type" in self.data_cfg
             pixel_source = PlusPixelSource(
                 self.data_cfg.pixel_source,
                 self.data_path,
@@ -375,6 +492,20 @@ class PlusDataset(SceneDataset):
             pixel_source.to(self.device)
             # collect img timestamps
             all_timestamps.append(pixel_source.timestamps)
+        
+        if self.data_cfg.lidar_source.load_lidar:
+            lidar_source = PlusLiDARSource(
+                self.data_cfg.lidar_source,
+                self.data_path,
+                self.start_timestep,
+                self.end_timestep,
+                device=self.device,
+                pose_type=self.data_cfg.pose_type,
+                scene_id=self.scene_idx,
+            )
+            lidar_source.to(self.device)
+            # collect lidar timestamps
+            all_timestamps.append(lidar_source.timestamps)
 
         assert len(all_timestamps) > 0, "No data source is loaded"
         all_timestamps = torch.cat(all_timestamps, dim=0)
@@ -516,7 +647,7 @@ class PlusDataset(SceneDataset):
                 # project lidar points to the image plane
                 # TODO: consider making this a function
                 intrinsic_4x4 = torch.nn.functional.pad(
-                    self.pixel_source.intrinsics[i], (0, 1, 0, 1)
+                    self.pixel_source.intrinsics[i], (0, 0, 0, 1)
                 )
                 intrinsic_4x4[3, 3] = 1.0
                 lidar2img = intrinsic_4x4 @ self.pixel_source.cam_to_worlds[i].inverse()
@@ -532,49 +663,47 @@ class PlusDataset(SceneDataset):
                     & (cam_points[:, 1] < self.pixel_source.HEIGHT)
                     & (depth > 0)
                 )
-                depth = depth[valid_mask]
+                _depth = depth[valid_mask]
                 _cam_points = cam_points[valid_mask]
                 depth_map = torch.zeros(
                     self.pixel_source.HEIGHT, self.pixel_source.WIDTH
                 ).to(self.device)
                 depth_map[
                     _cam_points[:, 1].long(), _cam_points[:, 0].long()
-                ] = depth.squeeze(-1)
+                ] = _depth.squeeze(-1)
                 depth_img = depth_map.cpu().numpy()
                 depth_img = depth_visualizer(depth_img, depth_img > 0)
                 mask = (depth_map.unsqueeze(-1) > 0).cpu().numpy()
                 # show the depth map on top of the rgb image
-                image = rgb_imgs[-1] * (1 - mask) + depth_img * mask
+                image = np.zeros_like(rgb_imgs[-1]) * (1 - mask) + depth_img * mask
+                # image = rgb_imgs[-1] * (1 - mask) + depth_img * mask
                 lidar_depths.append(image)
 
                 # project lidar flows to the image plane
-                flow_img = torch.zeros(
-                    self.pixel_source.HEIGHT, self.pixel_source.WIDTH, 3
-                ).to(self.device)
-                # to examine whether the ground labels are correct
-                valid_mask = valid_mask & (~data_dict["lidar_ground"])
-                _cam_points = cam_points[valid_mask]
-                # final color:
-                #  white if no flow, black if ground, and flow color otherwise
-                flow_color = scene_flow_to_rgb(
-                    data_dict["lidar_flow"][valid_mask],
-                    background="bright",
-                    flow_max_radius=1.0,
-                )
-                flow_img[
-                    _cam_points[:, 1].long(), _cam_points[:, 0].long()
-                ] = flow_color
-                flow_img = flow_img.cpu().numpy()
-                mask = (depth_map.unsqueeze(-1) > 0).cpu().numpy()
-                # show the flow on top of the rgb image
-                image = rgb_imgs[-1] * (1 - mask) + flow_img * mask
-                flow_colors.append(image)
+                # # to examine whether the ground labels are correct
+                # # valid_mask = valid_mask & (~data_dict["lidar_ground"])
+                # _cam_points = cam_points[valid_mask]
+                # # final color:
+                # #  white if no flow, black if ground, and flow color otherwise
+                # flow_color = scene_flow_to_rgb(
+                #     data_dict["lidar_flow"][valid_mask],
+                #     background="bright",
+                #     flow_max_radius=1.0,
+                # )
+                # flow_img[
+                #     _cam_points[:, 1].long(), _cam_points[:, 0].long()
+                # ] = flow_color
+                # flow_img = flow_img.cpu().numpy()
+                # mask = (depth_map.unsqueeze(-1) > 0).cpu().numpy()
+                # # # show the flow on top of the rgb image
+                # image = rgb_imgs[-1] * (1 - mask) + flow_img.cpu().numpy() * mask
+                # flow_colors.append(image)
 
         video_dict = {
             "gt_rgbs": rgb_imgs,
             "stacked": lidar_depths,
-            "flow_colors": flow_colors,
-            "gt_feature_pca_colors": feature_pca_colors,
+            # "flow_colors": flow_colors,
+            # "gt_feature_pca_colors": feature_pca_colors,
             # "gt_dynamic_objects": dynamic_objects,
             # "gt_sky_masks": sky_masks,
         }

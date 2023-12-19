@@ -1,17 +1,20 @@
 data:
-  # pose_type: 'vio'
-  data_root: /mnt/intel/jupyterhub/lu.li/plus_data/area
+  pose_type: vio
+  data_root: /data/plus_data
   dataset: plus
+  preload_device: cpu  
+  ray_batch_size: 6000 
   scene_idx: 20230319T090808_pdb-l4e-b0007_6_871to931
+  end_timestep: 286
   pixel_source:
     load_size: [540, 960]
     num_cams: 2
     load_dynamic_mask: False 
-    load_sky_mask: False
+    load_sky_mask: True
   lidar_source:
     load_lidar: False 
 render:
-  vis_voxel_size: 0.1 
+  vis_voxel_size: 0.3
 nerf:
   model:
     head:
@@ -19,7 +22,7 @@ nerf:
       enable_shadow_head: True # whether to use shadow head
       enable_flow_branch: True  # whether to use flow branch
       # ========== sky =========== #
-      enable_sky_head: False # will also initialize a feature sky head when a feature head is enabled
+      enable_sky_head: True # will also initialize a feature sky head when a feature head is enabled
 eval:
   eval_lidar_flow: False # whether to evaluate lidar flow, only available for waymo for now
   remove_ground_when_eval_lidar_flow: True # whether to remove ground points when evaluating lidar flow

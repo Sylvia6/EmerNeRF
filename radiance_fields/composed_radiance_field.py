@@ -561,7 +561,7 @@ class ComposedRadianceField(nn.Module):
             and directions is not None
         ):
             directions = directions[:, 0]
-            reduced_data_dict = {k: v[:, 0] for k, v in data_dict.items()}
+            reduced_data_dict = {k: v[:, 0] for k, v in data_dict.items() if k not in ["scene_id"]}
             sky_results = self.query_sky(scene_id, directions, data_dict=reduced_data_dict)
             results_dict.update(sky_results)
 
@@ -690,9 +690,9 @@ class ComposedRadianceField(nn.Module):
         if self.enable_cam_embedding or self.enable_img_embedding:
             # optionally add appearance embedding
             if "cam_idx" in data_dict and self.enable_cam_embedding:
-                appearance_embedding = self.appearance_embedding(data_dict["cam_idx"])
+                appearance_embedding = self.appearance_embedding[scene_id](data_dict["cam_idx"])
             elif "img_idx" in data_dict and self.enable_img_embedding:
-                appearance_embedding = self.appearance_embedding(data_dict["img_idx"])
+                appearance_embedding = self.appearance_embedding[scene_id](data_dict["img_idx"])
             else:
                 # use mean appearance embedding
                 appearance_embedding = torch.ones(

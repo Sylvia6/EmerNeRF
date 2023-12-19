@@ -42,3 +42,6 @@ fi
 # tags to show vio result
 # --vis_track True \
 # --global_cloud True \
+
+
+# /mnt/intel/jupyterhub/mingyao.li/nerf_data/plus/lon120.6019952_lat31.4720272_radius100_vehicle_patternpdb-l4e-b_start_date2023-11-01_end_date2023-11-15_start_hour1_end_hour8

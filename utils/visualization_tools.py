@@ -276,6 +276,7 @@ def scene_flow_to_rgb(
 
 
 def vis_occ_plotly(
+    ego_w: List[np.array],
     vis_aabb: List[Union[int, float]],
     coords: np.array = None,
     colors: np.array = None,
@@ -289,7 +290,6 @@ def vis_occ_plotly(
     title: str = None,
 ) -> go.Figure:  # type: ignore
     fig = go.Figure()  # start with an empty figure
-
     if coords is not None:
         # Add static trace
         static_trace = go.Scatter3d(
@@ -304,15 +304,17 @@ def vis_occ_plotly(
             ),
         )
         fig.add_trace(static_trace)
-
     # Add temporal traces
     if dynamic_coords is not None:
-        for i in range(len(dynamic_coords)):
+        for i in range(0, len(dynamic_coords), 5):
+            # coords_ = coords @ ego_w[i][:3,:3] + ego_w[i][:3,-1]
+            # dynamic_coords_ = np.concatenate(dynamic_coords[i:i+5]) @ ego_w[i][:3,:3] + ego_w[i][:3,-1]
+            dynamic_coords_ = dynamic_coords[i]
             fig.add_trace(
                 go.Scatter3d(
-                    x=dynamic_coords[i][:, 0],
-                    y=dynamic_coords[i][:, 1],
-                    z=dynamic_coords[i][:, 2],
+                    x=dynamic_coords_[:, 0],
+                    y=dynamic_coords_[:, 1],
+                    z=dynamic_coords_[:, 2],
                     mode="markers",
                     marker=dict(
                         size=size,
@@ -336,14 +338,14 @@ def vis_occ_plotly(
                 step["args"][1][i + 1] = True  # Toggle i'th temporal trace to "visible"
                 steps.append(step)
         else:
-            for i in range(len(dynamic_coords)):
+            for i in range(0,len(dynamic_coords)):
                 step = dict(
                     method="restyle",
                     args=[
                         "visible",
                         [False] * (len(dynamic_coords)),
                     ],
-                    label=f"Second {i}",
+                    label=f"Second {i*5}",
                 )
                 step["args"][1][i] = True  # Toggle i'th temporal trace to "visible"
                 steps.append(step)
@@ -494,16 +496,16 @@ def visualize_voxels(
             (aabb_max - aabb_min) / cfg.render.vis_voxel_size * 0.8
         ).long()
         all_occupied_dynamic_points = []
+        ego_w = []
         empty_dynamic_voxels = torch.zeros(*dynamic_voxel_resolution, device=device)
 
     # collect some patches for PCA
     to_compute_pca_patches = []
 
-
+    
     """
         1. query depth, lidar_mode
     """
-
     pbar = tqdm(
         dataset.full_pixel_set,
         desc="querying depth",
@@ -520,7 +522,7 @@ def visualize_voxels(
     else:
         static_depths, dynamic_depths = [], []  # save results, to reduce time consumption
 
-    for i, data_dict in enumerate(pbar):        
+    for i, data_dict in enumerate(pbar):
         data_dict = dataset.full_pixel_set[i]
         if hasattr(dataset, 'scenes'):
             scene_id = dataset.full_pixel_set.get_scene_id(i)
@@ -612,6 +614,7 @@ def visualize_voxels(
                         torch.nonzero(empty_dynamic_voxels),
                     )
                 )
+                ego_w.append(dataset.pixel_source.ego_to_worlds[int(data_dict["img_idx"][0][0])].cpu().numpy())
                 empty_dynamic_voxels = torch.zeros(
                     *dynamic_voxel_resolution, device=device
                 )
@@ -634,13 +637,12 @@ def visualize_voxels(
     all_occupied_static_points = voxel_coords_to_world_coords(
         aabb_min, aabb_max, static_voxel_resolution, torch.nonzero(empty_static_voxels)
     )
-    import pdb;pdb.set_trace()
     chunk = 2**18
     pca_colors = []
     occupied_points = []
     pbar = tqdm(
         range(0, all_occupied_static_points.shape[0], chunk),
-        desc="querying static features",
+        desc="querying static fields",
         dynamic_ncols=True,
     )
     for i in pbar:
@@ -675,12 +677,20 @@ def visualize_voxels(
             del feats
             colors = (colors - color_min) / (color_max - color_min)
         else:
+            # import pdb;pdb.set_trace()
+            # with torch.no_grad():
+            #     rgbs = model.forward(
+            #         occupied_points_chunk,
+            #         query_feature_head=True,
+            #         query_pe_head=False,
+            #     )["rgb"]
             colors = torch.ones_like(occupied_points_chunk)
         pca_colors.append(torch.clamp(colors, 0, 1))
         occupied_points.append(occupied_points_chunk)
 
     pca_colors = torch.cat(pca_colors, dim=0)
     occupied_points = torch.cat(occupied_points, dim=0)
+    
     if is_dynamic:
         dynamic_pca_colors = []
         dynamic_occupied_points = []
@@ -693,7 +703,7 @@ def visualize_voxels(
             assert len(unq_timestamps) == len(all_occupied_dynamic_points)
             # query every 10 frames
             pbar = tqdm(
-                range(0, len(all_occupied_dynamic_points), 10),
+                range(0, len(all_occupied_dynamic_points)),
                 desc="querying dynamic fields",
                 dynamic_ncols=True,
             )
@@ -740,7 +750,7 @@ def visualize_voxels(
             unq_timestamps = dataset.pixel_source.unique_normalized_timestamps.to(device)
             # query every 10 frames
             pbar = tqdm(
-                range(0, len(all_occupied_dynamic_points), 10),
+                range(0, len(all_occupied_dynamic_points)),
                 desc="querying dynamic fields",
                 dynamic_ncols=True,
             )
@@ -748,6 +758,8 @@ def visualize_voxels(
             for i in pbar:
                 occupied_points_chunk = all_occupied_dynamic_points[i]
                 if occupied_points_chunk.shape[0] == 0:
+                    # dynamic_pca_colors.append(torch.zeros(1,3))
+                    # dynamic_occupied_points.append(torch.zeros(1,3))
                     continue
                 normed_timestamps = unq_timestamps[i].repeat(
                     occupied_points_chunk.shape[0], 1
@@ -761,6 +773,8 @@ def visualize_voxels(
                 selector = results["dynamic_density"].squeeze() > 0.1
                 occupied_points_chunk = occupied_points_chunk[selector]
                 if len(occupied_points_chunk) == 0:
+                    # dynamic_pca_colors.append(torch.zeros(1,3))
+                    # dynamic_occupied_points.append(torch.zeros(1,3))
                     continue
                 # query some features
                 normed_timestamps = unq_timestamps[i].repeat(
@@ -782,13 +796,14 @@ def visualize_voxels(
                     colors[:, 1] = 1    # green
                 dynamic_pca_colors.append(torch.clamp(colors, 0, 1))
                 dynamic_occupied_points.append(occupied_points_chunk)
+            
             dynamic_coords = [x.cpu().numpy() for x in dynamic_occupied_points]
             dynamic_colors = [x.cpu().numpy() for x in dynamic_pca_colors]
     else:
         dynamic_coords = None
         dynamic_colors = None
-
     figure = vis_occ_plotly(
+        ego_w=ego_w,
         vis_aabb=vis_voxel_aabb.cpu().numpy().tolist(),
         coords=occupied_points.cpu().numpy(),
         colors=pca_colors.cpu().numpy(),
@@ -804,10 +819,10 @@ def visualize_voxels(
     # for plotly
     data = figure.to_dict()["data"]
     layout = figure.to_dict()["layout"]
-    output_path = os.path.join(out_dir, f"feature_field.json")
-    with open(output_path, "w") as f:
-        json.dump({"data": data, "layout": layout}, f, cls=NumpyEncoder)
-    logger.info(f"Saved to {output_path}")
+    # output_path = os.path.join(out_dir, f"feature_field.json")
+    # with open(output_path, "w") as f:
+    #     json.dump({"data": data, "layout": layout}, f, cls=NumpyEncoder)
+    # logger.info(f"Saved to {output_path}")
     output_path = os.path.join(out_dir, f"feature_field.html")
     if save_html:
         figure.write_html(output_path)
