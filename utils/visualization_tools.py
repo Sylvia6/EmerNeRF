@@ -631,7 +631,7 @@ def visualize_voxels(
             np.save(dynamic_path, dynamic_depths)
     
     """
-        2. query density and feature
+        2. query density and feature / rgb
     """
     # now let's query the densitys and features
     all_occupied_static_points = voxel_coords_to_world_coords(
@@ -677,17 +677,10 @@ def visualize_voxels(
             del feats
             colors = (colors - color_min) / (color_max - color_min)
         else:
-            # import pdb;pdb.set_trace()
-            # with torch.no_grad():
-            #     rgbs = model.forward(
-            #         occupied_points_chunk,
-            #         query_feature_head=True,
-            #         query_pe_head=False,
-            #     )["rgb"]
             colors = torch.ones_like(occupied_points_chunk)
         pca_colors.append(torch.clamp(colors, 0, 1))
         occupied_points.append(occupied_points_chunk)
-
+    
     pca_colors = torch.cat(pca_colors, dim=0)
     occupied_points = torch.cat(occupied_points, dim=0)
     
@@ -922,3 +915,127 @@ def visualize_scene_flow(
         output_path = os.path.join(cfg.log_dir, f"gt_flow.html")
         gt_figure.write_html(output_path)
         logger.info(f"GT flow saved to {output_path}")
+
+
+def render_pointcloud(
+    cfg: OmegaConf,
+    model: RadianceField,
+    proposal_estimator: PropNetEstimator = None,
+    proposal_networks: DensityField = None,
+    dataset: SceneDataset = None,
+    device: str = "cuda",
+    save_html: bool = True,
+    is_dynamic: bool = False,
+):
+    import open3d as o3d
+    out_dir = os.path.join(cfg.log_dir, "voxel_out")
+    os.makedirs(out_dir, exist_ok=True)
+    model.eval()
+    for p in proposal_networks:
+        p.eval()
+    if proposal_estimator is not None:
+        proposal_estimator.eval()
+    if proposal_networks is not None:
+        for p in proposal_networks:
+            p.eval()
+
+    pointcloud = []
+    rgbs = []
+    """
+        1. query depth, lidar_mode
+    """
+    pbar = tqdm(
+        dataset.full_pixel_set,
+        desc="querying depth and rgb",
+        dynamic_ncols=True,
+        total=len(dataset.full_pixel_set),
+    )
+    static_path, dynamic_path = f"{out_dir}/static_depths.npy", f"{out_dir}/dynamic_depths.npy"
+    use_stored_depth = os.path.exists(static_path) and os.path.exists(dynamic_path)
+    print(f"Using stored depth: {use_stored_depth}...")
+    if use_stored_depth:
+        static_depths = torch.from_numpy(np.load(static_path)).to(device)
+        dynamic_depths = torch.from_numpy(np.load(dynamic_path)).to(device)
+        assert static_depths.shape == dynamic_depths.shape
+    else:
+        static_depths, dynamic_depths = [], []  # save results, to reduce time consumption
+
+    for i, data_dict in enumerate(pbar):
+        data_dict = dataset.full_pixel_set[i]
+        if hasattr(dataset, 'scenes'):
+            scene_id = dataset.full_pixel_set.get_scene_id(i)
+            data_dict['scene_id'] = scene_id
+        for k, v in data_dict.items():
+            if isinstance(v, torch.Tensor):
+                if k not in ['scene_id']:
+                    data_dict[k] = v.to(device)
+        # query the depth. we force a lidar mode here so that the renderer will skip
+        # querying other features such as colors, features, etc.
+        data_dict["lidar_origins"] = data_dict["origins"].to(device)
+        data_dict["lidar_viewdirs"] = data_dict["viewdirs"].to(device)
+        data_dict["lidar_normed_timestamps"] = data_dict["normed_timestamps"].to(device)
+        if not use_stored_depth:
+            with torch.no_grad():
+                render_results = render_rays(
+                    radiance_field=model,
+                    proposal_estimator=proposal_estimator,
+                    proposal_networks=proposal_networks,
+                    data_dict=data_dict,
+                    cfg=cfg,
+                    proposal_requires_grad=False,
+                    prefix="lidar_",  # force lidar mode
+                    return_decomposition=True,
+                )
+            if is_dynamic:
+                static_depth = render_results["static_depth"]
+                dynamic_depth = render_results["dynamic_depth"]
+                dynamic_depths.append(dynamic_depth)
+            else:
+                static_depth = render_results["depth"]
+            static_depths.append(static_depth)        
+        else:
+            static_depth = static_depths[i]
+            dynamic_depth = dynamic_depths[i]
+
+
+        # ==== get the static points ======
+        point_static = data_dict["lidar_origins"] + data_dict["lidar_viewdirs"] * static_depth
+
+        # # ==== get the dynamic points ======
+        # if is_dynamic:
+        #     point_dynamic = data_dict["lidar_origins"] + data_dict["lidar_viewdirs"] * dynamic_depth
+        
+        with torch.no_grad():
+            results = model.forward(
+                point_static,
+                data_dict["viewdirs"],
+                data_dict=data_dict,
+                combine_static_dynamic=True,
+            )
+            rgb = results["static_rgb"]
+            # if is_dynamic:
+            #     results = model.forward(
+            #         point_dynamic,
+            #         data_dict["viewdirs"],
+            #         data_dict=data_dict,
+            #         combine_static_dynamic=True,
+            #     )
+            #     rgb += results["rgb"]
+
+        mask = static_depth.squeeze()<80
+        pointcloud.append(point_static[mask].cpu().numpy().reshape(-1,3))
+        rgbs.append(rgb[mask].cpu().numpy().reshape(-1,3))
+
+    if not use_stored_depth:
+        static_depths = torch.stack(static_depths).cpu().numpy()
+        dynamic_depths = torch.stack(dynamic_depths).cpu().numpy()
+        if len(static_depths) == len(dynamic_depths):
+            np.save(static_path, static_depths)
+            np.save(dynamic_path, dynamic_depths)
+    points = np.concatenate(pointcloud)
+    rgbs = np.concatenate(rgbs)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points[::50])
+    pcd.colors = o3d.utility.Vector3dVector(rgbs[::50])
+    o3d.io.write_point_cloud("tmp_static.pcd",pcd)
+    import pdb;pdb.set_trace()

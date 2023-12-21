@@ -17,6 +17,7 @@ from datasets.base.scene_dataset import SceneDataset
 from datasets.base.split_wrapper import SplitWrapper
 from datasets.utils import voxel_coords_to_world_coords
 from radiance_fields.video_utils import depth_visualizer, save_videos, scene_flow_to_rgb
+from datasets.utils import get_ground_np
 
 logger = logging.getLogger()
 
@@ -213,7 +214,8 @@ class PlusPixelSource(ScenePixelSource):
                     ret = np.zeros_like(raw).astype(np.bool8)
                     for cls in cityscapes_dynamic_classes:
                         ind = cityscapes_classes_ind_map[cls]
-                        ret[raw==ind] = True                    
+                        ret[raw==ind] = True   
+                    ret = ret.squeeze()                 
                 elif fname.endswith(".png"):
                     ret = np.array(Image.open(fname).convert("L"))
                 else:
@@ -280,7 +282,7 @@ class PlusLiDARSource(SceneLidarSource):
         assert os.path.exists(data_file)
         with open(data_file) as f:
             data = json.load(f)        
-        self.frames = data["frames"][self.start_timestep : self.end_timestep * self.data_cfg.num_cams][::self.data_cfg.num_cams]
+        self.frames = data["frames"][self.start_timestep : self.end_timestep * self.data_cfg.num_cams: self.data_cfg.num_cams]
         
         lidar_filepaths = []
         selected_steps = []
@@ -302,12 +304,20 @@ class PlusLiDARSource(SceneLidarSource):
         
         # we tranform the poses w.r.t. the first timestep to make the origin of the
         # first ego pose as the origin of the world coordinate system.
+        l2imu = np.array(self.frames[0]["l2imu"])
+        if "20230319T090808_pdb-l4e-b0007_6_871to931" in self.data_path:
+            l2imu = np.array([
+                [9.8429859096846628e-01, -1.5662345907265007e-02, 1.7581517209323497e-01, 5.1420710941564280e+00,],
+                [1.2696898646099625e-02, 9.9975773963492853e-01, 1.7979176978685573e-02, -5.0000000000000003e-02,],
+                [-1.7605417513442656e-01, -1.5464571146378534e-02, 9.8425899765102265e-01, 2.6510007479274904e+00],
+                [0., 0., 0., 1.]
+                ])
         if self.pose_type == 'odom':
-            l2ws = np.array([frame["imu2w"] for frame in self.frames]) 
-            self.lidar_to_worlds = torch.from_numpy(l2ws)    # 避免eqdc的精度损失
+            l2ws = np.array([frame["imu2w"] @ l2imu for frame in self.frames]) 
+            self.lidar_to_worlds = torch.from_numpy(l2ws).float()    # 避免eqdc的精度损失
         elif self.pose_type == 'vio':
             # due to camera transform
-            l2ws = np.array([cam_pose_to_nerf(frame["imu2w_vio"], gl=False) for frame in self.frames])
+            l2ws = np.array([cam_pose_to_nerf(frame["imu2w_vio"] @ l2imu, gl=False) for frame in self.frames])
             self.lidar_to_worlds = torch.from_numpy(l2ws).float()
         else:
             raise ValueError("The pose_type is a ValueError str.")
@@ -317,7 +327,7 @@ class PlusLiDARSource(SceneLidarSource):
         """
         Load the lidar data of the dataset from the filelist.
         """
-        origins, directions, ranges, laser_ids = [], [], [], []
+        origins, directions, ranges, grounds, laser_ids = [], [], [], [], []
         # flow/ground info are used for evaluation only
         flows, flow_classes, grounds = [], [], []
         # in plus, we simplify timestamps as the time indices
@@ -332,6 +342,7 @@ class PlusLiDARSource(SceneLidarSource):
             # ground_labels: 1d, intensities: 1d, elongations: 1d, laser_ids: 1d
             lidar_origins = torch.zeros(1,3)
             lidar_points = torch.from_numpy(np.fromfile(self.lidar_filepaths[t], dtype=np.float32).reshape(-1,4)[:,:3]).float()
+            
             # transform lidar points from lidar coordinate system to world coordinate system
             lidar_origins = (
                 self.lidar_to_worlds[t][:3, :3] @ lidar_origins.T
@@ -345,10 +356,10 @@ class PlusLiDARSource(SceneLidarSource):
             lidar_ranges = torch.norm(lidar_directions, dim=-1, keepdim=True)
             lidar_directions = lidar_directions / lidar_ranges
             accumulated_num_rays += len(lidar_ranges)
-
             origins.append(lidar_origins.repeat(len(lidar_ranges), 1))
             directions.append(lidar_directions)
             ranges.append(lidar_ranges)
+            # grounds.append(get_ground_np(lidar_points))
 
             # we use time indices as the timestamp for waymo dataset
             lidar_timestamp = torch.ones_like(lidar_ranges).squeeze(-1) * self.selected_steps[t]
@@ -361,6 +372,7 @@ class PlusLiDARSource(SceneLidarSource):
         self.origins = torch.cat(origins, dim=0)
         self.directions = torch.cat(directions, dim=0)
         self.ranges = torch.cat(ranges, dim=0)
+        # self.grounds = torch.cat(grounds, dim=0)
 
         self._timestamps = (torch.cat(timestamps, dim=0)-self.start_timestep).float()
         self._timesteps = (torch.cat(timesteps, dim=0)-self.start_timestep).long()
@@ -650,7 +662,7 @@ class PlusDataset(SceneDataset):
                     self.pixel_source.intrinsics[i], (0, 0, 0, 1)
                 )
                 intrinsic_4x4[3, 3] = 1.0
-                lidar2img = intrinsic_4x4 @ self.pixel_source.cam_to_worlds[i].inverse()
+                lidar2img = intrinsic_4x4 @ self.pixel_source.cam_to_worlds[i].inverse().float()  # lidar to img
                 lidar_points = (
                     lidar2img[:3, :3] @ lidar_points.T + lidar2img[:3, 3:4]
                 ).T
@@ -675,9 +687,32 @@ class PlusDataset(SceneDataset):
                 depth_img = depth_visualizer(depth_img, depth_img > 0)
                 mask = (depth_map.unsqueeze(-1) > 0).cpu().numpy()
                 # show the depth map on top of the rgb image
-                image = np.zeros_like(rgb_imgs[-1]) * (1 - mask) + depth_img * mask
-                # image = rgb_imgs[-1] * (1 - mask) + depth_img * mask
+                image = rgb_imgs[-1] * (1 - mask) + depth_img * mask
                 lidar_depths.append(image)
+
+                # show depth cmap
+                import matplotlib.pyplot as plt
+                import matplotlib.image as mpimg                
+                # pts = np.fromfile(self.lidar_source.lidar_filepaths[i], dtype=np.float32).reshape(-1,4)
+                # pts[:, 3] = 1.
+                # P = np.array(self.pixel_source.intrinsics[i])
+                # c2w = np.array(self.pixel_source.cam_to_worlds[i])
+                # l2w = np.array(self.lidar_source.lidar_to_worlds[i])
+                # lidar2img = P @ np.linalg.inv(c2w) @ l2w
+                # proj = lidar2img @ pts.T
+                # cam = np.delete(proj,np.where(proj[2,:]<=0),axis=1)
+                # cam[:2,:] /= cam[2,:]
+                # u,v,z = cam
+                # u_out = np.logical_or(u<0, u>960)
+                # v_out = np.logical_or(v<0, v>540)
+                # outlier = np.logical_or(u_out, v_out)
+                # cam = np.delete(cam,np.where(outlier),axis=1)
+                # u,v,z = cam
+                u,v,z = _cam_points[:, 0].long().numpy(), _cam_points[:, 1].long().numpy(), _depth.numpy()
+                plt.imshow(rgb_imgs[-1])
+                plt.scatter([u], [v], c=[z],cmap='rainbow',alpha=0.5,s=2)
+                plt.savefig("tmp.png", bbox_inches='tight')
+                import pdb;pdb.set_trace()
 
                 # project lidar flows to the image plane
                 # # to examine whether the ground labels are correct
@@ -700,7 +735,7 @@ class PlusDataset(SceneDataset):
                 # flow_colors.append(image)
 
         video_dict = {
-            "gt_rgbs": rgb_imgs,
+            # "gt_rgbs": rgb_imgs,
             "stacked": lidar_depths,
             # "flow_colors": flow_colors,
             # "gt_feature_pca_colors": feature_pca_colors,

@@ -23,7 +23,7 @@ from radiance_fields.render_utils import render_rays
 from radiance_fields.video_utils import render_pixels, save_videos
 from third_party.nerfacc_prop_net import PropNetEstimator, get_proposal_requires_grad_fn
 from utils.logging import MetricLogger, setup_logging
-from utils.visualization_tools import visualize_voxels, visualize_scene_flow
+from utils.visualization_tools import render_pointcloud, visualize_voxels, visualize_scene_flow
 
 logger = logging.getLogger()
 current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
@@ -602,6 +602,18 @@ def main(args):
             is_dynamic=cfg.nerf.model.head.enable_dynamic_branch,
         )
         logger.info("Visualization done!")
+
+        logger.info("Rendering pointcloud...")
+        render_pointcloud(
+            cfg,
+            model,
+            proposal_estimator,
+            proposal_networks,
+            dataset,
+            device=device,
+            save_html=True,
+            is_dynamic=cfg.nerf.model.head.enable_dynamic_branch,
+        )
         exit()  
 
     if args.eval_only:
