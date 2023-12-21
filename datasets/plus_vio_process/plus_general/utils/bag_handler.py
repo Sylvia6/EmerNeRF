@@ -305,6 +305,18 @@ class BagHandler(object):
             self.bag = RosBag(self.bag_path)
         else:
             self.bag = FastBag(self.bag_path)
+    
+    @staticmethod
+    def filter_topic_exist(bag_path, topics):
+        if bag_path.endswith('.bag'):
+            bag = RosBag(bag_path)
+        else:
+            bag = FastBag(bag_path)
+        filter_topic = []
+        for tp in topics:
+            if bag.check_topic_exists(tp):
+                filter_topic.append(tp)
+        return filter_topic            
 
     def check_calibration_topic_exist(self):
         calibration_topics = ["/perception/calibrations", "/perception/ot_calibrations"]

@@ -469,6 +469,7 @@ class Calibrator:
                 "rear_right": "rear_right_camera",
                 "side_left": "side_left_camera",
                 "side_right": "side_right_camera",
+                "lidar": "lidar"
             }
         result_dict = {}
         calib_key = []

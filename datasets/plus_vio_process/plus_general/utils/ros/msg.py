@@ -1021,7 +1021,10 @@ class PointCloud2(genpy.Message):
       start = end
       end += length
       if python3:
-        self.header.frame_id = str[start:end].decode('utf-8')
+        if b"innovusion" in str[start:end]:
+           self.header.frame_id = str[start:start + len(b"innovusion")].decode('utf-8')
+        else:
+          self.header.frame_id = str[start:end].decode('utf-8')
       else:
         self.header.frame_id = str[start:end]
       _x = self

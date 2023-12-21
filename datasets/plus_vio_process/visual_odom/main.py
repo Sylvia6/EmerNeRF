@@ -59,6 +59,23 @@ def convert_boolstr(v):
     else:
         raise TypeError("{} is not a valid bool string".format(v))
 
+def safe_inverse(a): #parallel version
+    if len(a.shape) == 3:
+        inv = a.copy()
+        inv[:, :3, :3] = a[:, :3, :3].transpose(0, 2, 1)
+        inv[:, :3, -1] = -inv[:, :3, -1] @ a[:, :3, -1]
+    else:
+        inv = a.copy()
+        inv[:3, :3] = a[:3, :3].T
+        inv[:3, -1] = -inv[:3, :3] @ a[:3, -1]
+
+    # inv = a.clone()
+    # r_transpose = a[:, :3, :3].transpose(1,2) #inverse of rotation matrix
+    # r = a[]
+    # inv[:, :3, :3] = r_transpose
+    # inv[:, :3, 3:4] = -torch.matmul(r_transpose, a[:, :3, 3:4])
+
+    return inv
 
 class PipelineCfg(CfgNode):
     def __init__(self):
@@ -373,8 +390,10 @@ class Pipeline(object):
             pose_dict[ts] = pose
         
         localization_topic = "/localization/state"
-        lidar_topic = "/rslidar_points"
-        other_topics = [localization_topic, lidar_topic]
+        lidar_topic = ['/livox/lidar', '/rslidar_points', "/innovusion_lidar/iv_points"]
+        lidar_topic = BagHandler.filter_topic_exist(bag_path=self.path_manager.bag_name, topics=lidar_topic)
+        other_topics = [localization_topic] + lidar_topic
+
         bag_handler = ImageBagHandler(self.path_manager.bag_name, front_left=True, front_right=True,
                                       odom=True, other_topics=other_topics)
 
@@ -391,8 +410,9 @@ class Pipeline(object):
             os.makedirs(cam_dir, exist_ok=True)
           
         lc_to_imu = self.calibrator.calib_params_dict["stereo"]["Tr_cam_to_imu"]
-        rc_to_imu = lc_to_imu @ np.linalg.inv(cam_t_pose)
+        rc_to_imu = lc_to_imu @ safe_inverse(cam_t_pose)
 
+        print("Calculating fine eqdcs pose.")
         eqdcs = []
         vios = []
         for idx, msg_dict in enumerate(tqdm.tqdm(bag_handler.msg_generator(to_image=True))):
@@ -420,19 +440,19 @@ class Pipeline(object):
         # window_slide eqdc to make it smooth
         for i in range(len(eqdcs)):
             # window to i
-            window_eqdcs = np.linalg.inv(eqdcs[i]) @ eqdcs[max(0, i - window_size) : min(len(eqdcs), i + window_size)]
-            window_vios = np.linalg.inv(vios[i]) @ vios[max(0, i - window_size) : min(len(vios), i + window_size)]
+            window_eqdcs = safe_inverse(eqdcs[i]) @ eqdcs[max(0, i - window_size) : min(len(eqdcs), i + window_size)]
+            window_vios = safe_inverse(vios[i]) @ vios[max(0, i - window_size) : min(len(vios), i + window_size)]
             
-            trans = np.array([np.linalg.inv(window_vios[j]) @ window_eqdcs[j] for j in range(len(window_eqdcs))])
-            # trans = np.array([np.linalg.inv(window_eqdcs[j]) @ window_vios[j] for j in range(len(window_eqdcs))])
+            trans = np.array([safe_inverse(window_vios[j]) @ window_eqdcs[j] for j in range(len(window_eqdcs))])
+            # trans = np.array([safe_inverse(window_eqdcs[j]) @ window_vios[j] for j in range(len(window_eqdcs))])
             mean_trans = average_se3_transformations(trans)
             eqdc_fine.append(eqdcs[i] @ mean_trans)
 
         eqdc_fine = np.array(eqdc_fine)
-        imu_eqdc = eqdc_fine @ np.linalg.inv(np.asarray(lc_to_imu))
+        imu_eqdc = eqdc_fine @ safe_inverse(np.asarray(lc_to_imu))
 
         # base_pose = eqdc_fine[0]
-        # eqdc_to_0 = np.linalg.inv(base_pose) @ eqdc_fine
+        # eqdc_to_0 = safe_inverse(base_pose) @ eqdc_fine
         # self.extract_global_cloud(poses=eqdc_fine, suffix="eqdc_vio")
         
         frames = []
@@ -448,15 +468,17 @@ class Pipeline(object):
 
             # lidar
             lidar_pts = None
-            if lidar_topic in msg_dict:
-                pc_msg = msg_dict[lidar_topic][0].message
-                if lidar_topic == '/livox/lidar' or lidar_topic == '/rslidar_points' or lidar_topic == '/innovusion_lidar/iv_points':
-                    lidar_pts = np.array(list(read_points(pc_msg, field_names=['x', 'y', 'z', 'intensity'], skip_nans=True)), dtype=np.float32)
-                    lidar_pts[:,:3] = lidar_pts[:,:3] * 0.01
-                else:
-                    lidar_pts = np.array(list(read_points(pc_msg, field_names=['x', 'y', 'z', 'intensity', 'ring'], skip_nans=True)), dtype=np.float32)
+            for tp in lidar_topic:
+                if tp in msg_dict:
+                    pc_msg = msg_dict[tp][0].message
+                    if lidar_topic == '/livox/lidar' or lidar_topic == '/rslidar_points' or lidar_topic == '/innovusion_lidar/iv_points':
+                        lidar_pts = np.array(list(read_points(pc_msg, field_names=['x', 'y', 'z', 'intensity'], skip_nans=True)), dtype=np.float32)
+                        lidar_pts[:,:3] = lidar_pts[:,:3] * 0.01
+                    else:
+                        lidar_pts = np.array(list(read_points(pc_msg, field_names=['x', 'y', 'z', 'intensity', 'ring'], skip_nans=True)), dtype=np.float32)
             if lidar_pts is not None:
                 lidar_pts.tofile(os.path.join(self.path_manager.cloud_root, f"{idx:06d}.bin"))
+                l2imu = self.calibrator.calib_params_dict["lidar"]["Tr_lidar_to_imu"]
 
             # image 
             left = msg_dict["front_left"].message
@@ -469,12 +491,12 @@ class Pipeline(object):
             # imu_to_w, pose = np.matrix(msg_dict["imu_to_world"]), msg_dict["pose"]    # odom
             imu_to_w = imu_eqdc[tmp_idx]    # eqdc
             lc_to_w = imu_to_w @ lc_to_imu
-            rc_to_w = lc_to_w @ np.linalg.inv(cam_t_pose)
+            rc_to_w = lc_to_w @ safe_inverse(cam_t_pose)
 
             #       2. vio pose
             lc_to_w_vio = pose_dict[left_image_timestamp]   # 相对first_frame的pose
-            rc_to_w_vio = lc_to_w_vio @ np.linalg.inv(cam_t_pose)
-            imu_to_w_vio = lc_to_w_vio @ np.linalg.inv(lc_to_imu)
+            rc_to_w_vio = lc_to_w_vio @ safe_inverse(cam_t_pose)
+            imu_to_w_vio = lc_to_w_vio @ safe_inverse(lc_to_imu)
 
             frames.append({
                 "idx": "{:06d}".format(idx),
@@ -483,6 +505,7 @@ class Pipeline(object):
                 "transform_matrix_vio": lc_to_w_vio.tolist(),
                 "imu2w": imu_to_w.tolist(),
                 "imu2w_vio": imu_to_w_vio.tolist(), 
+                "l2imu": l2imu.tolist(),
                 "c2imu": lc_to_imu.tolist(),
                 "cam_name": "front_left",
                 "intr": p1.tolist(),
@@ -497,6 +520,7 @@ class Pipeline(object):
                 "transform_matrix_vio": rc_to_w_vio.tolist(),
                 "imu2w": imu_to_w.tolist(),
                 "imu2w_vio": imu_to_w_vio.tolist(),
+                "l2imu": l2imu.tolist(),
                 "c2imu": rc_to_imu.tolist(),
                 "cam_name": "front_right",
                 "intr": p2.tolist(),
@@ -672,7 +696,7 @@ def cam_pose_to_nerf(cam_pose, gl=True):
     """
     if gl:
         opencv2opengl = np.array([[1,0,0,0], [0,-1,0,0], [0,0,-1,0],[0,0,0,1]]).astype(float)
-        opengl2opencv = np.linalg.inv(opencv2opengl)
+        opengl2opencv = safe_inverse(opencv2opengl)
         opengl2world = np.array([[0,0,-1,0], [-1,0,0,0], [0,1,0,0],[0,0,0,1]]).astype(float)
         gl_pose = opencv2opengl @ cam_pose @ opengl2opencv  
         world_pose = opengl2world @ gl_pose
