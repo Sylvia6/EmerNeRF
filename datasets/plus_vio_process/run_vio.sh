@@ -10,10 +10,12 @@ if [ ! -e "$out_dir" ]; then
     echo "Directory created: $out_dir"
 fi
 
+cd /mnt/intel/jupyterhub/lu.li/code/EmerNeRF/datasets/plus_vio_process
+
 if [ -f "$bag" ]; then
     # 文件
     echo "Processing bag file: $bag"
-    python -m visual_odom.main --bag_name "$bag"  --cache_pre "$out_dir" --nerf True
+    /mnt/intel/jupyterhub/lu.li/conda/bin/python -m visual_odom.main --bag_name "$bag"  --cache_pre "$out_dir" --nerf True
 
 elif [ -d "$bag" ]; then
     # 目录
@@ -28,7 +30,7 @@ elif [ -d "$bag" ]; then
             echo -e "\n-----------------------------"
             echo -ne "Processing file: $file [$processed_files/$file_count] [$progress%]\r"
 
-            python -m visual_odom.main --bag_name "$file" --cache_pre "$out_dir" --nerf True
+            /mnt/intel/jupyterhub/lu.li/conda/bin/python -m visual_odom.main --bag_name "$file" --cache_pre "$out_dir" --nerf True
             
             echo -e "------------------------------\n"
         fi

@@ -1023,6 +1023,8 @@ class PointCloud2(genpy.Message):
       if python3:
         if b"innovusion" in str[start:end]:
            self.header.frame_id = str[start:start + len(b"innovusion")].decode('utf-8')
+        elif b"rslidar" in str[start:end]:
+           self.header.frame_id = str[start:start + len(b"rslidar")].decode('utf-8')
         else:
           self.header.frame_id = str[start:end].decode('utf-8')
       else:

@@ -712,7 +712,6 @@ class PlusDataset(SceneDataset):
                 plt.imshow(rgb_imgs[-1])
                 plt.scatter([u], [v], c=[z],cmap='rainbow',alpha=0.5,s=2)
                 plt.savefig("tmp.png", bbox_inches='tight')
-                import pdb;pdb.set_trace()
 
                 # project lidar flows to the image plane
                 # # to examine whether the ground labels are correct

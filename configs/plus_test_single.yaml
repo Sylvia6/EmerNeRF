@@ -1,10 +1,11 @@
 data:
   pose_type: vio
-  data_root: /data/plus_data
+  data_root: /mnt/intel/jupyterhub/lu.li/plus_data
   dataset: plus
-  preload_device: cpu  
+  preload_device: cuda  # cpu
   ray_batch_size: 6000 #4096 # ray batch size for training, it's embedded in the dataset class for now
-  scene_idx: 20230319T090808_pdb-l4e-b0007_6_871to931
+  scene_idx: 20221228T111336_pdb-l4e-b0002_20_1to21
+  # 20230319T090808_pdb-l4e-b0007_6_871to931
   pixel_source:
     load_rgb: True
     load_size: [540, 960]
@@ -13,7 +14,7 @@ data:
     load_sky_mask: True
   lidar_source:
     num_cams: 2
-    load_lidar: True
+    load_lidar: False
 render:
   vis_voxel_size: 0.1 
 nerf:
@@ -24,7 +25,6 @@ nerf:
       enable_flow_branch: True  # whether to use flow branch
       # ========== sky =========== #
       enable_sky_head: True # will also initialize a feature sky head when a feature head is enabled
-
 logging:
   vis_freq: 1000 # how often to visualize training stats
 #   print_freq: 10 # how often to print training stats
